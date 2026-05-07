@@ -1,11 +1,13 @@
-"""End-to-end smoke test that wires all four harness modules together.
+"""End-to-end smoke test that wires every harness module together.
 
 Run with: `uv run python examples/end_to_end.py`
 
 There is no real model call. A fake `runner` plays a canned script:
-1. The "assistant" emits a tool_use for `echo`.
-2. The orchestrator's caller (this script) dispatches the tool.
-3. The "assistant" emits a final text message.
+1. The "assistant" first attempts a `shell` tool call. A pre-tool policy
+   blocks it before the dispatcher runs.
+2. The "assistant" retries with the allowed `echo` tool. The dispatcher
+   runs it and the post-tool hook logs the result.
+3. The "assistant" emits a final text message that references both.
 
 Pre/post-tool hooks log each step so you can see the lifecycle.
 """
@@ -19,12 +21,11 @@ from pydantic import BaseModel
 
 from harness.agents import Orchestrator, SubAgent
 from harness.hooks import HookRunner, PostToolUse, PreToolUse
+from harness.policy import AllowList, attach_pre_tool_policies
 from harness.prompts import (
     Message,
-    assistant_tool_use,
     attach_file,
     text,
-    user_tool_result,
 )
 from harness.tools import Dispatcher, Tool, ToolCall
 
@@ -54,6 +55,7 @@ def build_hooks(transcript: list[str]) -> HookRunner:
 
     hooks.register(PreToolUse, on_pre)
     hooks.register(PostToolUse, on_post)
+    attach_pre_tool_policies(hooks, AllowList.of({"echo"}))
     return hooks
 
 
@@ -72,14 +74,23 @@ async def main() -> int:
     hooks = build_hooks(transcript)
 
     async def fake_runner(agent: SubAgent, messages: list[Message]) -> Message:
-        # Step 1: the model decides to use the echo tool.
-        call = ToolCall(name="echo", arguments={"text": "hello"}, id="call-1")
-        await hooks.emit(PreToolUse(call=call))
-        result = await dispatcher.dispatch(call)
-        await hooks.emit(PostToolUse(call=call, result=result))
+        # Attempt 1: forbidden tool — the AllowList policy blocks it pre-dispatch.
+        forbidden = ToolCall(name="shell", arguments={"command": "echo hi"}, id="call-0")
+        decisions = await hooks.emit(PreToolUse(call=forbidden))
+        blocked = next((d for d in decisions if d.block), None)
+        if blocked is not None:
+            transcript.append(f"[policy]    BLOCKED tool={forbidden.name} reason={blocked.reason}")
 
-        # Step 2: the model returns a final text answer.
-        return text("assistant", f"Echoed: {result.content}")
+        # Attempt 2: allowed tool — policy passes, dispatcher runs.
+        allowed = ToolCall(name="echo", arguments={"text": "hello"}, id="call-1")
+        await hooks.emit(PreToolUse(call=allowed))
+        result = await dispatcher.dispatch(allowed)
+        await hooks.emit(PostToolUse(call=allowed, result=result))
+
+        return text(
+            "assistant",
+            f"Skipped forbidden tool; echoed {result.content!r}.",
+        )
 
     orch = Orchestrator(dispatcher, hooks, fake_runner)
     agent = SubAgent(
@@ -89,19 +100,12 @@ async def main() -> int:
     )
 
     messages = build_initial_messages()
-
-    # Show the synthesized assistant turn and a follow-up tool_result so the
-    # transcript captures the full message shape, not just the final answer.
     final = await orch.run(agent, messages)
-    intermediate_call = ToolCall(name="echo", arguments={"text": "hello"}, id="call-1")
-    intermediate_result = await dispatcher.dispatch(intermediate_call)
 
     transcript.append("--- transcript ---")
     transcript.append(f"input messages: {len(messages)}")
     for i, m in enumerate(messages):
         transcript.append(f"  [{i}] role={m.role} blocks={[b.type for b in m.content]}")
-    transcript.append(f"assistant tool_use: {assistant_tool_use(intermediate_call).model_dump()}")
-    transcript.append(f"user tool_result:   {user_tool_result(intermediate_result).model_dump()}")
     transcript.append(f"final assistant message: {final.content[0].text!r}")
 
     print("\n".join(transcript))

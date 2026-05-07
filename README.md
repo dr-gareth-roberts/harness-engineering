@@ -6,13 +6,14 @@ Opensource toolbox for harness engineering — utilities, primitives, and patter
 
 The "harness" is everything around the model: prompt assembly, tool wiring, permission gating, hook execution, sub-agent dispatch, memory, retries, sandboxing, telemetry. This repo aims to collect reusable building blocks for that layer — independent of any one CLI or vendor — so harness authors can compose rather than rebuild.
 
-The MVP ships four small, composable modules:
+The MVP ships five small, composable modules:
 
 | Module             | What it gives you                                                       |
 | ------------------ | ----------------------------------------------------------------------- |
 | `harness.tools`    | Pydantic-backed `Tool` + async `Dispatcher` with validation             |
 | `harness.prompts`  | `Message` / `ContentBlock`, file attachment, simple compaction          |
 | `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit   |
+| `harness.policy`   | `AllowList` / `DenyList` / `ArgumentMatcher` policies for tool calls    |
 | `harness.agents`   | `SubAgent` + `Orchestrator` that emits lifecycle hooks (model-agnostic) |
 
 ## Install
@@ -66,7 +67,8 @@ Out of scope for the MVP (PRs welcome):
 - Real model API calls (today the `Orchestrator` takes an injected `runner`).
 - Persistent memory / session storage.
 - Telemetry / OpenTelemetry export.
-- Permission/sandbox primitives — `HookDecision.block` is the seed; full policy engine is later.
+- Sandbox primitives (filesystem, network, subprocess) — `harness.policy` ships
+  the tool-call layer; sandbox execution is later.
 - Replay / eval harness.
 - Summarization-based compaction.
 
