@@ -61,13 +61,7 @@ def build_initial_messages() -> list[Message]:
     here = Path(__file__).resolve()
     return [
         text("system", "You are a small demo assistant."),
-        Message(
-            role="user",
-            content=[
-                attach_file(here),
-                # follow-up text in the same user turn
-            ],
-        ),
+        Message(role="user", content=[attach_file(here)]),
         text("user", "Please echo the word 'hello'."),
     ]
 
