@@ -97,7 +97,12 @@ class OpenTelemetrySink:
             if key in _RESERVED_FIELDS:
                 continue
             attr_key = f"harness.{key}"
-            if value is None or isinstance(value, str | int | float | bool):
+            if value is None:
+                # OTel attributes don't accept None — the SDK logs a warning
+                # and drops the attribute. Skip explicitly so the warning
+                # stays out of the operator's stderr.
+                continue
+            if isinstance(value, str | int | float | bool):
                 attributes[attr_key] = value
             else:
                 # OTel attribute values must be scalar (or homogeneous sequences

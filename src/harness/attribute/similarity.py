@@ -82,7 +82,7 @@ class EmbeddingSimilarity:
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
         try:
-            from sentence_transformers import (  # type: ignore[import-not-found]
+            from sentence_transformers import (  # type: ignore[import-not-found, unused-ignore]
                 SentenceTransformer,
             )
         except ImportError as exc:
@@ -93,7 +93,7 @@ class EmbeddingSimilarity:
 
     def __call__(self, a: str, b: str) -> float:
         # Lazy-imported to avoid pulling numpy at module import time.
-        import numpy as np  # type: ignore[import-not-found]
+        import numpy as np  # type: ignore[import-not-found, unused-ignore]
 
         embeddings = self._model.encode([a, b], convert_to_numpy=True)
         vec_a = embeddings[0]

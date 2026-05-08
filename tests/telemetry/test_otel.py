@@ -225,3 +225,35 @@ def test_constructor_raises_when_otel_missing(monkeypatch: pytest.MonkeyPatch) -
 
     with pytest.raises(ImportError, match=r"\[otel\]"):
         otel_mod.OpenTelemetrySink()
+
+
+async def test_none_valued_payload_fields_are_skipped_not_emitted(
+    otel_pipeline: tuple[otel_trace.Tracer, InMemorySpanExporter],
+) -> None:
+    """OTel attribute values can't be None — the SDK logs a warning and
+    drops the attribute. We skip None-valued payload fields explicitly
+    so the operator's stderr stays clean.
+
+    Concrete trigger: `OrchestratorTurn.error: str | None = None`. A
+    successful turn carries `error=None`, and emitting that as
+    `harness.error=None` produced the warning.
+    """
+    tracer, exporter = otel_pipeline
+    sink = OpenTelemetrySink(tracer=tracer)
+
+    # OrchestratorTurn with default error=None — the regression case.
+    event = OrchestratorTurn(agent_name="demo", duration_ms=42.0)
+    assert event.error is None
+
+    with tracer.start_as_current_span("turn"):
+        await sink.emit(event)
+
+    [span] = exporter.get_finished_spans()
+    [otel_event] = span.events
+    attrs: dict[str, Any] = dict(otel_event.attributes or {})
+
+    # The error attribute must NOT be present (skipped, not emitted as None).
+    assert "harness.error" not in attrs
+    # Non-None scalar payload fields are still promoted.
+    assert attrs["harness.agent_name"] == "demo"
+    assert attrs["harness.duration_ms"] == 42.0
