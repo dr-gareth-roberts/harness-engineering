@@ -538,3 +538,226 @@ async def test_running_history_passed_to_speculator_grows_per_iteration() -> Non
     assert spec.begin_calls[0]["history_len"] == 1
     # Iteration 2 sees user + assistant(tool_use) + user(tool_result).
     assert spec.begin_calls[1]["history_len"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Wave 6: per-event speculator surfacing
+
+
+async def test_runner_calls_observe_for_each_tool_use_block_in_stream() -> None:
+    """The runner iterates the stream's content_block_stop events and
+    surfaces each tool_use block to `speculator.observe` before the
+    stream finishes. With two tool_use blocks in one response, observe
+    must fire twice — once per block."""
+    tool_use_1 = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "hello"})
+    tool_use_2 = FakeToolUseBlock(id="tu_2", name="echo", input={"text": "world"})
+    response_1 = FakeMessage(
+        content=[tool_use_1, tool_use_2],
+        stop_reason="tool_use",
+    )
+    response_2 = FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, _ = _echo_dispatcher()
+    spec = _StubSpeculator()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    await runner(_agent(), [text("user", "echo")])
+
+    # observe fired twice in iteration 1 (one per tool_use block) and
+    # zero times in iteration 2 (which has only a text block).
+    assert [c.id for c in spec.observe_calls] == ["tu_1", "tu_2"]
+    # cancel_unobserved fires once per iteration, regardless of content.
+    assert spec.cancel_unobserved_calls == 2
+
+
+async def test_runner_does_not_observe_text_block_stop_events() -> None:
+    """`observe` is for tool_use blocks only — text block stops MUST NOT
+    surface to the speculator. Otherwise a chatty response with no tools
+    would spam observe calls and confuse the matching logic."""
+    response = FakeMessage(
+        content=[FakeTextBlock(text="just chatting"), FakeTextBlock(text="more text")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+    spec = _StubSpeculator()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    await runner(_agent(), [text("user", "say something")])
+
+    assert spec.observe_calls == []
+    # cancel_unobserved still fires after the stream — the speculator
+    # decides what to do with it (most likely cancel everything).
+    assert spec.cancel_unobserved_calls == 1
+
+
+async def test_runner_with_speculator_none_iterates_stream_without_error() -> None:
+    """When no speculator is configured, the runner still iterates the
+    event stream (otherwise the fake's get_final_message wouldn't drive
+    accumulation deterministically). It just doesn't observe."""
+    tool_use = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "hi"})
+    response_1 = FakeMessage(content=[tool_use], stop_reason="tool_use")
+    response_2 = FakeMessage(content=[FakeTextBlock(text="done")], stop_reason="end_turn")
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, dispatch_log = _echo_dispatcher()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        # speculator=None
+    )
+    result = await runner(_agent(), [text("user", "echo hi")])
+
+    # Normal dispatch happened — runner didn't trip over event iteration.
+    assert dispatch_log == ["hi"]
+    assert isinstance(result, Message)
+
+
+async def test_runner_explicit_events_drive_observe_in_order() -> None:
+    """Stream events can be scripted explicitly via `FakeMessage.events`
+    to drive a specific arrival order. Pin that the runner observes in
+    arrival order, not content-list order."""
+    from tests.runner.fakes import FakeContentBlockStopEvent
+
+    tool_use_1 = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "first"})
+    tool_use_2 = FakeToolUseBlock(id="tu_2", name="echo", input={"text": "second"})
+    text_block = FakeTextBlock(text="thinking")
+
+    # content list order: text, tool_1, tool_2
+    # events arrival order: tool_2, text, tool_1 (deliberately scrambled
+    # to prove the runner uses event order, not content order)
+    response_1 = FakeMessage(
+        content=[text_block, tool_use_1, tool_use_2],
+        stop_reason="tool_use",
+        events=[
+            FakeContentBlockStopEvent(index=2, content_block=tool_use_2),
+            FakeContentBlockStopEvent(index=0, content_block=text_block),
+            FakeContentBlockStopEvent(index=1, content_block=tool_use_1),
+        ],
+    )
+    response_2 = FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, _ = _echo_dispatcher()
+    spec = _StubSpeculator()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    await runner(_agent(), [text("user", "echo")])
+
+    # Order matches arrival, not content order. Text block does NOT
+    # surface to observe.
+    assert [c.id for c in spec.observe_calls] == ["tu_2", "tu_1"]
+
+
+async def test_unobserved_speculation_does_not_complete_when_dispatch_diverges() -> None:
+    """Wave 6's correctness claim: when the model emits a tool_use that
+    no speculation predicted, the runner cancels the speculation via
+    `cancel_unobserved` so its handler never runs to completion. The
+    runner then dispatches the model's actual call normally.
+
+    Stream-end cancellation can fire fast enough that the speculation
+    task hasn't even started yet — that's *more* than the perf claim
+    promises (zero handler runtime instead of partial). So we don't
+    pin a strict start→cancel→run ordering; we only pin: predicted
+    handler did NOT finish, actual handler DID run. The speculator
+    unit test `test_cancel_unobserved_runs_fast_when_handler_is_slow`
+    is the place that pins the timing claim directly.
+    """
+    import asyncio
+
+    from harness.speculate import Speculator
+    from harness.speculate.predictor import Predictor
+
+    events: list[str] = []
+
+    async def predicted_handler(args: EchoIn) -> str:
+        events.append("predicted:start")
+        try:
+            await asyncio.sleep(10.0)  # very slow — we never want this to win
+            events.append("predicted:done")
+            return "predicted-done"
+        except asyncio.CancelledError:
+            events.append("predicted:cancelled")
+            raise
+
+    async def actual_handler(args: EchoIn) -> str:
+        events.append("actual:run")
+        return f"actual-done-{args.text}"
+
+    dispatcher = Dispatcher(
+        [
+            Tool(
+                name="predicted_tool",
+                description="",
+                input_model=EchoIn,
+                handler=predicted_handler,
+                idempotent=True,
+            ),
+            Tool(
+                name="actual_tool",
+                description="",
+                input_model=EchoIn,
+                handler=actual_handler,
+                idempotent=True,
+            ),
+        ]
+    )
+
+    class FixedPredictor:
+        """Always predicts the slow predicted_tool — the model will
+        emit actual_tool instead, making this a guaranteed miss."""
+
+        def predict(
+            self,
+            history: list[Message],
+            idempotent_tools: dict[str, Tool],
+            max_predictions: int,
+        ) -> list[ToolCall]:
+            return [ToolCall(name="predicted_tool", arguments={"text": "x"})]
+
+    predictor: Predictor = FixedPredictor()
+    speculator = Speculator(predictor, max_speculations=1)
+
+    # Model emits actual_tool, not predicted_tool.
+    tool_use = FakeToolUseBlock(id="tu_1", name="actual_tool", input={"text": "hi"})
+    response_1 = FakeMessage(content=[tool_use], stop_reason="tool_use")
+    response_2 = FakeMessage(content=[FakeTextBlock(text="done")], stop_reason="end_turn")
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+
+    agent = SubAgent(
+        name="t",
+        system_prompt="",
+        model="test-model",
+        allowed_tools=["predicted_tool", "actual_tool"],
+    )
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=speculator,
+    )
+    await runner(agent, [text("user", "do it")])
+
+    # Correctness claim: actual_tool's handler ran, predicted_tool's
+    # handler never finished. The "predicted:start" marker is allowed
+    # but optional — cancellation may fire before the task scheduler
+    # has given the speculation any CPU time at all (the strongest
+    # version of the win).
+    assert "actual:run" in events
+    assert "predicted:done" not in events

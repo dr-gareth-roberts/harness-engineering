@@ -499,3 +499,201 @@ async def test_hook_exception_during_speculation_does_not_crash_runner() -> None
     assert "simulated hook bug" in str(result.content)
     # And the result's id was patched to the model's call id.
     assert result.id == "m"
+
+
+# ---------------------------------------------------------------------------
+# Wave 6: per-event observe + cancel_unobserved
+
+
+async def test_observe_marks_first_unobserved_matching_pending_spec() -> None:
+    """`observe(call)` is a hint from the runner that the model emitted a
+    tool_use matching `(call.name, call.arguments)`. The speculator marks
+    the first unobserved pending entry that matches. Subsequent
+    `cancel_unobserved` must leave that entry alone."""
+    dispatcher = _dispatcher(idempotent=["search", "parse"], slow_handlers={"search": 0.20})
+    speculator = Speculator(LastCallPredictor(history_window=2), max_speculations=2)
+
+    history = [
+        Message(role="user", content=[ContentBlock(type="text", text="hi")]),
+        Message(
+            role="assistant",
+            content=[
+                ContentBlock(
+                    type="tool_use",
+                    tool_use=ToolCall(name="search", arguments={"q": "x"}, id="a"),
+                )
+            ],
+        ),
+        Message(
+            role="assistant",
+            content=[
+                ContentBlock(
+                    type="tool_use",
+                    tool_use=ToolCall(name="parse", arguments={"q": "x"}, id="b"),
+                )
+            ],
+        ),
+    ]
+    await speculator.begin(
+        history=history,
+        agent=_agent(["search", "parse"]),
+        dispatcher=dispatcher,
+        hooks=HookRunner(),
+    )
+
+    # Observe a call that matches the slow `search` speculation. This
+    # marks it as observed; cancel_unobserved should NOT cancel it.
+    await speculator.observe(ToolCall(name="search", arguments={"q": "x"}, id="m1"))
+    await speculator.cancel_unobserved()
+
+    # `search` was observed → still resolvable.
+    hit = await speculator.try_resolve(ToolCall(name="search", arguments={"q": "x"}, id="m2"))
+    assert hit is not None
+    assert hit.content == "search-result-x"
+
+    # `parse` was unobserved → cancelled by cancel_unobserved → no longer
+    # in the pending list, so try_resolve returns None.
+    miss = await speculator.try_resolve(ToolCall(name="parse", arguments={"q": "x"}, id="m3"))
+    assert miss is None
+
+    await speculator.end()
+
+
+async def test_observe_with_no_match_is_a_noop() -> None:
+    """If the model emits a tool_use that no speculation predicted,
+    `observe` records nothing — and `cancel_unobserved` cancels everything."""
+    log: list[str] = []
+    dispatcher = _dispatcher(
+        idempotent=["search"],
+        handler_log=log,
+        slow_handlers={"search": 0.20},
+    )
+    speculator = Speculator(LastCallPredictor(history_window=1), max_speculations=1)
+
+    await speculator.begin(
+        history=_history_with_call("search", {"q": "x"}),
+        agent=_agent(["search"]),
+        dispatcher=dispatcher,
+        hooks=HookRunner(),
+    )
+
+    # Observe a call that doesn't match the prediction. Should not raise
+    # or otherwise affect state — just a no-op claim attempt.
+    await speculator.observe(ToolCall(name="other", arguments={}, id="m1"))
+    await speculator.cancel_unobserved()
+
+    # The unmatched speculation is gone — try_resolve returns None.
+    result = await speculator.try_resolve(ToolCall(name="search", arguments={"q": "x"}, id="m2"))
+    assert result is None
+
+    await speculator.end()
+
+
+async def test_cancel_unobserved_with_no_pending_is_noop() -> None:
+    """Calling cancel_unobserved with nothing pending is harmless — used
+    by the runner on iterations where `begin` returned without launching
+    any speculation (no eligible idempotent tools)."""
+    speculator = Speculator(LastCallPredictor(history_window=1), max_speculations=1)
+    # Don't call begin — pending is empty.
+    await speculator.cancel_unobserved()  # must not raise
+    # Sanity: end() is also fine on empty pending.
+    await speculator.end()
+
+
+async def test_cancel_unobserved_runs_fast_when_handler_is_slow() -> None:
+    """The performance claim of Wave 6: an unobserved spec gets cancelled
+    immediately rather than running until `end`. Pin this with a slow
+    handler — cancel_unobserved must complete in well under the
+    handler's natural runtime."""
+    dispatcher = _dispatcher(
+        idempotent=["search"],
+        slow_handlers={"search": 0.50},
+    )
+    speculator = Speculator(LastCallPredictor(history_window=1), max_speculations=1)
+
+    await speculator.begin(
+        history=_history_with_call("search", {"q": "x"}),
+        agent=_agent(["search"]),
+        dispatcher=dispatcher,
+        hooks=HookRunner(),
+    )
+
+    # Don't observe anything — model "emitted" nothing matching.
+    start = time.perf_counter()
+    await speculator.cancel_unobserved()
+    elapsed = time.perf_counter() - start
+
+    # Cancellation drain should be fast (~ms), nowhere near the 500ms handler.
+    assert elapsed < 0.10, f"cancel_unobserved took {elapsed * 1000:.0f}ms — cancel slow"
+
+    await speculator.end()
+
+
+async def test_observe_then_try_resolve_resolves_observed_spec() -> None:
+    """Happy path through Wave 6's lifecycle: observe during stream,
+    cancel_unobserved after stream, try_resolve at dispatch time."""
+    dispatcher = _dispatcher(idempotent=["search"])
+    speculator = Speculator(LastCallPredictor(history_window=1), max_speculations=1)
+
+    await speculator.begin(
+        history=_history_with_call("search", {"q": "x"}),
+        agent=_agent(["search"]),
+        dispatcher=dispatcher,
+        hooks=HookRunner(),
+    )
+
+    # Stream emitted the predicted call.
+    await speculator.observe(ToolCall(name="search", arguments={"q": "x"}, id="m"))
+    # Stream ended; nothing to cancel because observation matched.
+    await speculator.cancel_unobserved()
+    # Now dispatch phase asks for the result.
+    result = await speculator.try_resolve(ToolCall(name="search", arguments={"q": "x"}, id="m"))
+    await speculator.end()
+
+    assert result is not None
+    assert result.id == "m"
+    assert result.content == "search-result-x"
+
+
+async def test_observe_claims_separate_entries_for_duplicate_calls() -> None:
+    """When the speculator launched two specs for the same `(name, args)`
+    shape (rare but allowed), two `observe` calls with that shape claim
+    separate entries. The second `try_resolve` for that shape must still
+    find the second observed entry."""
+    dispatcher = _dispatcher(idempotent=["search"])
+
+    class TwicePredictor:
+        """Returns the same call twice — the speculator launches two
+        identical-shape pending tasks."""
+
+        def predict(
+            self,
+            history: list[Message],
+            idempotent_tools: dict[str, Tool],
+            max_predictions: int,
+        ) -> list[ToolCall]:
+            return [
+                ToolCall(name="search", arguments={"q": "x"}),
+                ToolCall(name="search", arguments={"q": "x"}),
+            ]
+
+    speculator = Speculator(TwicePredictor(), max_speculations=2)
+    await speculator.begin(
+        history=[],
+        agent=_agent(["search"]),
+        dispatcher=dispatcher,
+        hooks=HookRunner(),
+    )
+
+    # Both observations claim distinct entries.
+    await speculator.observe(ToolCall(name="search", arguments={"q": "x"}, id="m1"))
+    await speculator.observe(ToolCall(name="search", arguments={"q": "x"}, id="m2"))
+    await speculator.cancel_unobserved()
+
+    # Both try_resolves succeed.
+    r1 = await speculator.try_resolve(ToolCall(name="search", arguments={"q": "x"}, id="m1"))
+    r2 = await speculator.try_resolve(ToolCall(name="search", arguments={"q": "x"}, id="m2"))
+    await speculator.end()
+
+    assert r1 is not None and r1.id == "m1"
+    assert r2 is not None and r2.id == "m2"

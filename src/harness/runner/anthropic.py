@@ -210,7 +210,40 @@ class AnthropicRunner:
 
             try:
                 async with self._client.messages.stream(**request) as stream:
+                    # Iterate the stream's high-level events as they
+                    # arrive. The only one we react to is
+                    # `content_block_stop` for `tool_use` blocks —
+                    # surface them to the speculator so it can mark
+                    # matching pending speculations as observed before
+                    # the model finishes generating. After the loop,
+                    # `get_final_message` returns the accumulated
+                    # message; the SDK's `until_done()` is a no-op once
+                    # the stream is consumed, mirrored by the test fake.
+                    async for event in stream:
+                        if self._speculator is None:
+                            continue
+                        if getattr(event, "type", None) != "content_block_stop":
+                            continue
+                        block = getattr(event, "content_block", None)
+                        if block is None or getattr(block, "type", None) != "tool_use":
+                            continue
+                        call = ToolCall(
+                            name=block.name,
+                            arguments=dict(block.input),
+                            id=block.id,
+                        )
+                        await self._speculator.observe(call)
                     response = await stream.get_final_message()
+
+                # Stream is now fully arrived. Cancel any pending
+                # speculations the model didn't claim, before we move on
+                # to dispatching its emitted tool_use blocks. This frees
+                # the handler runtime that would otherwise burn through
+                # the dispatch phase until `end()` finally cancels it.
+                # `end()` (in the finally block) still acts as a safety
+                # net for anything still pending.
+                if self._speculator is not None:
+                    await self._speculator.cancel_unobserved()
 
                 assistant_message = _translate_out(response)
                 running_history.append(assistant_message)
