@@ -1,6 +1,7 @@
 from harness.hooks.events import (
     Event,
     HookDecision,
+    PostAssistantMessage,
     PostToolUse,
     PreToolUse,
     PromptSubmit,
@@ -14,6 +15,7 @@ __all__ = [
     "Event",
     "HookDecision",
     "HookRunner",
+    "PostAssistantMessage",
     "PostToolUse",
     "PreToolUse",
     "PromptSubmit",

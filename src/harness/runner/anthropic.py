@@ -30,7 +30,7 @@ except ImportError as exc:
     ) from exc
 
 from harness.agents.definition import SubAgent
-from harness.hooks.events import PostToolUse, PreToolUse
+from harness.hooks.events import PostAssistantMessage, PostToolUse, PreToolUse
 from harness.hooks.runner import HookRunner
 from harness.prompts.messages import ContentBlock, Message
 from harness.runner.protocols import PrefixWatcherProtocol
@@ -199,8 +199,11 @@ class AnthropicRunner:
             async with self._client.messages.stream(**request) as stream:
                 response = await stream.get_final_message()
 
+            assistant_message = _translate_out(response)
+            await self.hooks.emit(PostAssistantMessage(message=assistant_message))
+
             if response.stop_reason in ("end_turn", "stop_sequence"):
-                return _translate_out(response)
+                return assistant_message
 
             if response.stop_reason != "tool_use":
                 raise RuntimeError(

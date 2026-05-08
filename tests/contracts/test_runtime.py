@@ -18,12 +18,14 @@ from harness.contracts import (
 from harness.contracts.runtime import ContractWarning
 from harness.hooks import (
     HookRunner,
+    PostAssistantMessage,
     PostToolUse,
     PreToolUse,
     PromptSubmit,
     SessionEnd,
     SessionStart,
 )
+from harness.prompts.messages import text
 from harness.telemetry import MemorySink, Telemetry
 from harness.tools import ToolCall, ToolResult
 
@@ -190,3 +192,62 @@ async def test_stateful_pattern_carries_state_across_events_and_resets_per_run()
     await hooks2.emit(PreToolUse(call=ToolCall(name="search", arguments={"q": "x"}, id="s2")))
     decisions = await hooks2.emit(PreToolUse(call=ToolCall(name="answer", arguments={}, id="a2")))
     assert decisions == []
+
+
+async def test_assistant_text_contract_fires_live_on_post_assistant_message() -> None:
+    """Closes the runtime/offline asymmetry that the original `attach_contracts`
+    docstring warned about: a contract over assistant text now fires when a
+    runner emits `PostAssistantMessage`, not only when run offline via `check`.
+    """
+    hooks = HookRunner()
+    sink = MemorySink()
+    telemetry = Telemetry(sink=sink)
+
+    contract = Contract(
+        name="no_apologies",
+        pattern=Never(RoleIs("assistant") & TextMatches(r"(?i)i'?m sorry")),
+        action="warn",
+    )
+    attach_contracts(hooks, [contract], telemetry=telemetry)
+    await hooks.emit(SessionStart())
+
+    # Innocuous assistant message: no telemetry expected.
+    await hooks.emit(
+        PostAssistantMessage(message=text("assistant", "Sure, here's what I found."))
+    )
+    assert sink.events == []
+
+    # Apologetic assistant message: telemetry fires (warn, not raise).
+    await hooks.emit(
+        PostAssistantMessage(message=text("assistant", "I'm sorry, I can't help."))
+    )
+    assert len(sink.events) == 1
+    event = sink.events[0]
+    assert isinstance(event, ContractWarning)
+    assert event.contract == "no_apologies"
+
+
+async def test_forbid_contract_on_assistant_text_does_not_raise() -> None:
+    """`forbid` on an after-the-fact event surfaces as telemetry — the message
+    has already been produced; raising would surprise callers more than it helps.
+    """
+    hooks = HookRunner()
+    sink = MemorySink()
+    telemetry = Telemetry(sink=sink)
+
+    contract = Contract(
+        name="no_apologies_forbid",
+        pattern=Never(RoleIs("assistant") & TextMatches(r"(?i)sorry")),
+        action="forbid",
+    )
+    attach_contracts(hooks, [contract], telemetry=telemetry)
+    await hooks.emit(SessionStart())
+
+    # Should NOT raise even though the contract action is `forbid`.
+    await hooks.emit(
+        PostAssistantMessage(message=text("assistant", "I'm sorry about that."))
+    )
+    # Telemetry surfaces the violation instead.
+    assert len(sink.events) == 1
+    assert isinstance(sink.events[0], ContractWarning)
+    assert sink.events[0].contract == "no_apologies_forbid"

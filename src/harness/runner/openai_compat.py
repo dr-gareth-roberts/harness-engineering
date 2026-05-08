@@ -32,7 +32,7 @@ except ImportError as exc:
     ) from exc
 
 from harness.agents.definition import SubAgent
-from harness.hooks.events import PostToolUse, PreToolUse
+from harness.hooks.events import PostAssistantMessage, PostToolUse, PreToolUse
 from harness.hooks.runner import HookRunner
 from harness.prompts.messages import ContentBlock, Message, text
 from harness.runner.protocols import PrefixWatcherProtocol
@@ -243,8 +243,11 @@ class OpenAICompatRunner:
             choice = response.choices[0]
             finish_reason = choice.finish_reason
 
+            assistant_message = _translate_out(choice.message)
+            await self.hooks.emit(PostAssistantMessage(message=assistant_message))
+
             if finish_reason in ("stop", "length"):
-                return _translate_out(choice.message)
+                return assistant_message
 
             if finish_reason != "tool_calls":
                 raise RuntimeError(

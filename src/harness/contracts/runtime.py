@@ -21,6 +21,7 @@ from harness.contracts.contract import Contract, ContractViolation, Violation
 from harness.contracts.dfa import DFA, compile_contract
 from harness.hooks.events import (
     HookDecision,
+    PostAssistantMessage,
     PostToolUse,
     PreToolUse,
     PromptSubmit,
@@ -79,22 +80,28 @@ def attach_contracts(
     state for the lifetime of an `Orchestrator.run`. A `SessionStart` handler
     resets each DFA so a single `HookRunner` can drive multiple runs cleanly.
 
-    Observable events at runtime (current scope):
-        * `SessionStart` — DFAs reset.
-        * `PromptSubmit` — synthesized as a user-text `Message`.
-        * `PreToolUse`   — synthesized as an assistant `tool_use` `Message`.
-                           This is where `forbid` contracts most commonly
-                           block. Returns `HookDecision(block=True)` on match.
-        * `PostToolUse`  — synthesized as a user `tool_result` `Message`.
-        * `SessionEnd`   — DFAs finalize; unmet `require` contracts raise
-                           `ContractViolation`.
+    Observable events at runtime:
+        * `SessionStart`         — DFAs reset.
+        * `PromptSubmit`         — synthesized as a user-text `Message`.
+        * `PreToolUse`           — synthesized as an assistant `tool_use`
+                                   `Message`. This is where `forbid`
+                                   contracts most commonly block. Returns
+                                   `HookDecision(block=True)` on match.
+        * `PostAssistantMessage` — the assistant `Message` itself, fired
+                                   once per iteration of the runner's
+                                   tool-use loop (so text-plus-tool-use
+                                   intermediate messages are observed too).
+        * `PostToolUse`          — synthesized as a user `tool_result`
+                                   `Message`.
+        * `SessionEnd`           — DFAs finalize; unmet `require` contracts
+                                   raise `ContractViolation`.
 
-    Not yet observed at runtime: assistant *text* messages. There is no
-    `PostAssistantMessage` event in `harness.hooks` yet, so a contract such
-    as `Never(RoleIs("assistant") & TextMatches(...))` will fire correctly
-    against a recorded `SessionRecord` via `harness.contracts.check` but
-    will NOT fire live until the corresponding hook event lands. Use the
-    offline `check` for assistant-text invariants today.
+    Note on after-the-fact events: by the time `PostAssistantMessage` and
+    `PostToolUse` fire, the assistant text / tool result already exists.
+    A `forbid` contract matching there cannot un-emit the message. Both
+    handlers therefore surface matches as `ContractWarning` telemetry
+    rather than raising — use `PreToolUse` (and `PromptSubmit`) for
+    blocking, and `PostAssistantMessage` / `PostToolUse` for inspection.
     """
     dfas = [compile_contract(c) for c in contracts]
 
@@ -133,6 +140,21 @@ def attach_contracts(
 
     hooks.register(PreToolUse, on_pre_tool_use)
 
+    # PostAssistantMessage: feed the assistant `Message` itself so contracts
+    # over assistant text (e.g. `Never(RoleIs("assistant") & TextMatches(r"i'?m sorry"))`)
+    # fire live. Like PostToolUse, this is observational — the message has
+    # already been produced — so `forbid` matches surface as telemetry rather
+    # than raising. Use `PreToolUse` (or `PromptSubmit`) for blocking.
+    async def on_post_assistant_message(event: PostAssistantMessage) -> None:
+        for dfa in dfas:
+            violation = dfa.tick(event.message)
+            if violation is not None:
+                await _react_to_violation_observational(
+                    dfa.contract, violation, telemetry
+                )
+
+    hooks.register(PostAssistantMessage, on_post_assistant_message)
+
     # PostToolUse: feed the tool_result so contracts that look at results
     # (Eventually(...) on a result-shaped predicate, etc.) can observe them.
     async def on_post_tool_use(event: PostToolUse) -> None:
@@ -142,7 +164,9 @@ def attach_contracts(
             if violation is not None:
                 # PostToolUse can't block — the call already ran. But we still
                 # surface warn / forbid violations through telemetry.
-                await _react_to_violation(dfa.contract, violation, telemetry)
+                await _react_to_violation_observational(
+                    dfa.contract, violation, telemetry
+                )
 
     hooks.register(PostToolUse, on_post_tool_use)
 
@@ -172,7 +196,11 @@ async def _react_to_violation(
     violation: Violation,
     telemetry: Telemetry | None,
 ) -> HookDecision | None:
-    """Translate a DFA-emitted Violation into the right runtime side-effect."""
+    """Translate a DFA-emitted Violation into the right runtime side-effect.
+
+    Used by the *blocking* handlers (`PromptSubmit`, `PreToolUse`) where the
+    triggering action hasn't happened yet and `forbid` can stop it.
+    """
     if contract.action == "forbid":
         return HookDecision(
             block=True,
@@ -191,4 +219,31 @@ async def _react_to_violation(
     # Treat as a hard violation: raise immediately so callers find out at the
     # earliest possible point. This still goes through ContractViolation so
     # tests can introspect the carrier `Violation`.
+    raise ContractViolation(violation)
+
+
+async def _react_to_violation_observational(
+    contract: Contract,
+    violation: Violation,
+    telemetry: Telemetry | None,
+) -> None:
+    """After-the-fact handler for `PostAssistantMessage` and `PostToolUse`.
+
+    The triggering message / tool call already exists by the time these
+    events fire — `forbid` cannot un-emit it. We surface `forbid` and
+    `warn` as `ContractWarning` telemetry. `require` mid-stream still
+    raises (same fail-fast semantic as the blocking path), so a partial
+    `Always(...)` pattern that fails inside a `require` contract surfaces
+    immediately rather than waiting for `SessionEnd.finalize`.
+    """
+    if contract.action in ("forbid", "warn"):
+        if telemetry is not None:
+            await telemetry.emit(
+                ContractWarning(
+                    contract=violation.contract,
+                    message_index=violation.message_index,
+                )
+            )
+        return
+    # `require` mid-stream: raise (fail-fast).
     raise ContractViolation(violation)
