@@ -29,6 +29,8 @@ EXAMPLES: list[tuple[str, str]] = [
     # stdout when the example runs successfully.
     ("end_to_end", "final assistant message"),
     ("contracts", "contract"),
+    ("fuzz", "failures"),
+    ("attribute", "top"),
 ]
 
 
