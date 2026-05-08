@@ -38,6 +38,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("counterfactual", "counterfactual"),
     ("diff_eval", "unanimous"),
     ("plan", "plan"),
+    ("speculate", "SpeculationHit"),
+    ("cross_session", "cross-session"),
+    ("plan_inference", "inferred plan"),
 ]
 
 
