@@ -285,6 +285,8 @@ class _StubSpeculator:
     def __init__(self, hits: dict[str, ToolResult] | None = None) -> None:
         self.hits = dict(hits or {})
         self.begin_calls: list[dict[str, object]] = []
+        self.observe_calls: list[ToolCall] = []
+        self.cancel_unobserved_calls = 0
         self.try_resolve_calls: list[ToolCall] = []
         self.end_calls = 0
 
@@ -297,6 +299,12 @@ class _StubSpeculator:
         hooks: HookRunner,
     ) -> None:
         self.begin_calls.append({"history_len": len(history), "agent_name": agent.name})
+
+    async def observe(self, call: ToolCall) -> None:
+        self.observe_calls.append(call)
+
+    async def cancel_unobserved(self) -> None:
+        self.cancel_unobserved_calls += 1
 
     async def try_resolve(self, call: ToolCall) -> ToolResult | None:
         self.try_resolve_calls.append(call)

@@ -11,20 +11,42 @@ Lifecycle, per tool-use-loop iteration:
    `asyncio.Task` that runs the same `PreToolUse` / `dispatcher.dispatch`
    / `PostToolUse` cycle the runner would. Tasks run concurrently with
    the model's stream wait.
-2. **`try_resolve`** — runner calls per `tool_use` block the model emits.
+2. **`observe`** *(Wave 6, optional)* — event-aware runners call this
+   once per `tool_use` block as it arrives in the model's stream, i.e.
+   at each `ContentBlockStopEvent` whose block type is `tool_use`. We
+   mark a matching pending speculation as "observed" so it survives
+   the next step. Skipping `observe` entirely is allowed and equivalent
+   to "no speculation was observed" — `cancel_unobserved` then cancels
+   the whole pending set.
+3. **`cancel_unobserved`** *(Wave 6)* — runner calls once after the
+   stream has fully arrived. We cancel any pending speculation that no
+   `observe` claimed, freeing the handler runtime that would otherwise
+   keep running between stream-end and `end`. Pending entries that *were*
+   observed are kept for `try_resolve` to await.
+4. **`try_resolve`** — runner calls per `tool_use` block the model emits.
    If any pending speculation matches the call's `(name, arguments)`, we
    await its result, remove it from the pending list, and return the
    result with the model's `tool_use.id` patched in. The runner skips
    its own hook + dispatch cycle for that call. No match → return
    `None` and the runner takes over normally.
-3. **`end`** — runner calls in `finally`. We cancel any unmatched
+5. **`end`** — runner calls in `finally`. We cancel any unmatched
    pending tasks and clear state. Cancellation is best-effort: a tool
    handler that's already running may finish; its result gets discarded.
+
+Cancellation timing note: this implementation cancels at *stream-end*
+(via `cancel_unobserved`), not eagerly per `ContentBlockStopEvent`.
+Per-event eager cancellation would require a policy decision about
+when a speculation is "definitively dead" given the predictions in
+flight versus the calls observed so far — non-trivial when
+`max_speculations > 1`. Stream-end cancellation captures the bulk of
+the win (no handler runtime burned during the post-stream
+dispatch phase) without the policy complexity.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from harness.hooks.events import PostToolUse, PreToolUse
@@ -42,6 +64,23 @@ if TYPE_CHECKING:
     from harness.prompts.messages import Message
     from harness.telemetry.recorder import Telemetry
     from harness.tools.dispatcher import Dispatcher
+
+
+@dataclass
+class _Pending:
+    """One in-flight speculation: the predicted call, its task, and whether
+    the runner's `observe` has matched it against an emitted `tool_use`.
+
+    `observed=True` means a `ContentBlockStopEvent` for `tool_use` matched
+    this entry's `(name, arguments)`; `cancel_unobserved` will leave it
+    alone. `observed=False` at `cancel_unobserved` time means the model
+    didn't emit a matching call, and we cancel the task to free its
+    handler runtime before the runner moves on to dispatch.
+    """
+
+    call: ToolCall
+    task: asyncio.Task[ToolResult]
+    observed: bool = False
 
 
 class Speculator:
@@ -88,7 +127,7 @@ class Speculator:
         self._max_speculations = max_speculations
         self._only_idempotent = only_idempotent
         self._telemetry = telemetry
-        self._pending: list[tuple[ToolCall, asyncio.Task[ToolResult]]] = []
+        self._pending: list[_Pending] = []
 
     async def begin(
         self,
@@ -121,7 +160,7 @@ class Speculator:
                 # Predictor returned a non-eligible tool; ignore it.
                 continue
             task = asyncio.create_task(self._dispatch_via_hooks(call, dispatcher, hooks))
-            self._pending.append((call, task))
+            self._pending.append(_Pending(call=call, task=task))
             if self._telemetry is not None:
                 await self._telemetry.emit(SpeculationLaunched(tool_name=call.name))
 
@@ -171,10 +210,55 @@ class Speculator:
                 is_error=True,
             )
 
+    async def observe(self, call: ToolCall) -> None:
+        """Mark a matching pending speculation as observed.
+
+        Called by event-aware runners (post-Wave 6 `AnthropicRunner`)
+        once per `tool_use` block as it arrives in the stream. Only the
+        first unobserved match is claimed — duplicate observations of the
+        same `(name, arguments)` shape walk down the pending list and
+        each claim a separate task, which is the right behavior when the
+        speculator launched multiple specs for the same call (rare, but
+        permitted).
+
+        No telemetry is emitted here; an `observe` is bookkeeping, not a
+        hit. The hit/miss event still fires from `try_resolve`.
+        """
+        for entry in self._pending:
+            if (
+                not entry.observed
+                and entry.call.name == call.name
+                and entry.call.arguments == call.arguments
+            ):
+                entry.observed = True
+                return
+
+    async def cancel_unobserved(self) -> None:
+        """Cancel pending speculations that no `observe` claimed.
+
+        Called once after the model's stream has fully arrived but
+        before the runner starts dispatching the model's emitted
+        `tool_use` blocks. Frees the handler runtime that would
+        otherwise keep running between stream-end and `end`.
+
+        Observed entries stay in the pending list for `try_resolve` to
+        consume. Calling this when `observe` was never called is
+        equivalent to "no observations made, cancel everything" — which
+        is fine: the runner will then go to dispatch the model's calls
+        normally without speculation.
+        """
+        unobserved = [entry for entry in self._pending if not entry.observed]
+        if not unobserved:
+            return
+        # Drop the unobserved entries from pending so try_resolve can't
+        # later try to await a cancelled task.
+        self._pending = [entry for entry in self._pending if entry.observed]
+        await self._cancel_entries(unobserved)
+
     async def try_resolve(self, call: ToolCall) -> ToolResult | None:
         match_idx: int | None = None
-        for i, (spec_call, _spec_task) in enumerate(self._pending):
-            if spec_call.name == call.name and spec_call.arguments == call.arguments:
+        for i, entry in enumerate(self._pending):
+            if entry.call.name == call.name and entry.call.arguments == call.arguments:
                 match_idx = i
                 break
 
@@ -184,8 +268,8 @@ class Speculator:
             return None
 
         # Hit: await the matched task, remove it from pending.
-        _spec_call, spec_task = self._pending.pop(match_idx)
-        result = await spec_task
+        entry = self._pending.pop(match_idx)
+        result = await entry.task
         if self._telemetry is not None:
             await self._telemetry.emit(SpeculationHit(tool_name=call.name))
         # Patch the result id to match the model's tool_use id, so the
@@ -206,16 +290,19 @@ class Speculator:
             return
         pending = self._pending
         self._pending = []
-        for _call, task in pending:
-            if not task.done():
-                task.cancel()
+        await self._cancel_entries(pending)
+
+    async def _cancel_entries(self, entries: list[_Pending]) -> None:
+        for entry in entries:
+            if not entry.task.done():
+                entry.task.cancel()
         # Drain the cancellations so resources are released before we
         # return. Each cancelled task raises CancelledError when awaited;
         # already-completed tasks just return their result, which we
         # discard.
-        for _call, task in pending:
+        for entry in entries:
             try:
-                await task
+                await entry.task
             except asyncio.CancelledError:
                 pass
             except Exception:  # noqa: BLE001 - cleanup phase, swallow tool errors

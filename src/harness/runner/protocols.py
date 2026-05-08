@@ -50,6 +50,28 @@ class SpeculatorProtocol(Protocol):
     `dispatcher.dispatch` / `PostToolUse` flow the runner would use, so
     `BlockingPolicy` hooks see speculative calls too.
 
+        await speculator.observe(call)
+
+    is called by event-aware runners (`AnthropicRunner` post-Wave 6) once
+    per `tool_use` block as it arrives in the model's stream — i.e. at
+    each `ContentBlockStopEvent` whose block type is `tool_use`. The
+    speculator marks any matching pending speculation as "observed" so
+    `cancel_unobserved` won't cancel it. This is purely a hint: a runner
+    that doesn't iterate stream events MAY skip `observe` entirely, in
+    which case `cancel_unobserved` becomes a no-op and `try_resolve`
+    still works the same way. Implementations MUST tolerate `observe`
+    being skipped.
+
+        await speculator.cancel_unobserved()
+
+    fires once after the model's stream has fully arrived — i.e. after
+    the runner has observed every `tool_use` block the model emitted but
+    before the runner starts dispatching them. The speculator cancels
+    any pending speculations that no `observe` matched. This frees the
+    handler runtime that would otherwise be wasted between stream-end
+    and `end`. Skipping it is safe: `end` still cancels everything in a
+    `finally` block.
+
         result = await speculator.try_resolve(call)
 
     is called *once per tool_use block* the model emits — before the
@@ -83,6 +105,10 @@ class SpeculatorProtocol(Protocol):
         dispatcher: Dispatcher,
         hooks: HookRunner,
     ) -> None: ...
+
+    async def observe(self, call: ToolCall) -> None: ...
+
+    async def cancel_unobserved(self) -> None: ...
 
     async def try_resolve(self, call: ToolCall) -> ToolResult | None: ...
 
