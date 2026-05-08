@@ -20,14 +20,14 @@
 | Wave 8 | Polish + docs site + hardening                    | shipped | [docs/waves/wave-8.md](docs/waves/wave-8.md) |
 | Wave 9 | CI/CD + governance + housekeeping                  | shipped | [docs/waves/wave-9.md](docs/waves/wave-9.md) |
 | Wave 10 | Vendor runner parity + robustness                 | shipped | [docs/waves/wave-10.md](docs/waves/wave-10.md) |
-| Wave 11 | Deeper observability + verification               | shipped | (current — see below)                            |
+| Wave 11 | Deeper observability + verification               | shipped | [docs/waves/wave-11.md](docs/waves/wave-11.md) |
+| Wave 12 | Modality + Files API                              | shipped | (current — see below)                            |
 
-**Status: 10 of 10 standout features shipped, plus Waves 5–11 polish.**
+**Status: 10 of 10 standout features shipped, plus Waves 5–12 polish.**
 The forward plan from `0.2.0` to `1.0` lives in
-[`docs/plan.md`](docs/plan.md): five waves (9 through 13), ~13–15
-developer-days, every gap from the Wave 8 audit assigned to a wave.
-Waves 9–11 shipped (17 of 28 gaps cleared; #1, #2, #7, #8, #9, #15,
-#16, #17, #19 remain across Waves 12–13).
+[`docs/plan.md`](docs/plan.md): now six waves (9 through 13b after
+splitting Wave 13). Waves 9–12 shipped (19 of 28 gaps cleared; #1, #2,
+#9, #15, #16, #17, #19 remain across Waves 13a and 13b).
 
 ## Cross-cutting decisions
 
@@ -58,67 +58,64 @@ Waves 9–11 shipped (17 of 28 gaps cleared; #1, #2, #7, #8, #9, #15,
 ---
 
 
-## Wave 11 — Deeper observability + verification
+## Wave 12 — Modality + Files API
 
 ### Goal
-Telemetry tells you the *shape* of a run, not just the events; tests
-cover the surfaces that vendor fakes can't reach; coverage gaps become
-visible.
+Bring multimodal input — vision (images via base64 or URL) and the
+Anthropic Files API — into the harness primitives. Streaming output
+(#9) was originally in this wave's scope; deferred per advisor review
+to its own dedicated wave (Wave 13a) because it's the heaviest single
+item in the 28-gap plan and a tail-of-wave squeeze risks regressions
+in the 510 existing tests around `AnthropicRunner.__call__`.
 
 ### Status
-Shipped on `feature/wave-11-observability`. Four gaps cleared (#10,
-#11, #18, #20); #19 (cassette pattern for vendor SDKs) deferred — it
-needs real-API recordings (no API keys available in this environment),
-and the existing `FakeAsync*` infrastructure already provides
-scripted-response replay for SDK-shape testing.
+Shipped on `feature/wave-12-modality-streaming`. Two gaps cleared
+(#7, #8); #9 deferred to Wave 13a.
 
 ### What landed
 
 | # | Item | Implementation |
 | --- | --- | --- |
-| 11 | Correlation IDs | `TelemetryEvent` gains `trace_id` / `span_id` / `parent_span_id` (all optional). `Telemetry` recorder gets two `asynccontextmanager` APIs: `session_scope()` mints a 32-hex `trace_id` (OTel-compatible 128-bit), `span_scope()` mints a 16-hex `span_id` (OTel-compatible 64-bit) and snapshots the previous span as `parent_span_id`. State lives in `contextvars`, so nested + concurrent spans (think `asyncio.gather` over tool dispatches) get distinct IDs without manual threading. `Orchestrator.run()` opens session+span scopes; `Dispatcher.dispatch()` opens a nested span scope per call. Existing tests pass without modification because all three fields default to `None` and the recorder only fills them in when a scope is open. |
-| 10 | OTel attribute promotion | `OpenTelemetrySink` removes correlation IDs from the reserved-fields list so `harness.trace_id` / `harness.span_id` / `harness.parent_span_id` ride as flat attributes on every emitted OTel event. Users can group / filter by `harness.trace_id` in Jaeger / Tempo / Honeycomb without the sink needing to synthesize spans itself. **Full span-tree synthesis is documented as deferred**: `tracer.start_span` calls the configured `IdGenerator` to mint the span_id, ignoring whatever harness span_id we hand it — round-tripping the harness IDs faithfully needs a custom `IdGenerator` (or lower-level span construction APIs) and isn't a short add. The conservative attribute path lands the data without lying about the structure. |
-| 18 | DAP CLI subprocess test | `tests/debug/test_dap_cli.py` spawns the real `harness debug --dap` process via `asyncio.create_subprocess_exec`, writes framed DAP requests to its stdin, reads framed responses from its stdout, and asserts the full launch → setBreakpoints → configurationDone → launch → break → continue → terminated → disconnect flow round-trips. Validates the `connect_read_pipe` / `connect_write_pipe` plumbing the CLI uses for real editor integrations. ~0.4s wall-clock when warm. |
-| 20 | Coverage tooling | `pytest-cov>=5` added to `[dev]` extras. `pyproject.toml` gets a `[tool.coverage.run]` (branch coverage on, source `src/harness`) + `[tool.coverage.report]` (`fail_under = 85`, sensible exclusions) section. CI runs `pytest --cov=harness`; below threshold = red. Current run reports **89% branch coverage** with all extras installed. |
-| 19 | Cassette pattern | **Deferred** to a wave with API keys available. The `FakeAsync*` fakes already cover scripted-response replay; what's missing is the *recording* step against the real API, which requires credentials this environment doesn't have. Documented in the wave entry; format design lands when recordings can. |
+| 7 | Vision content blocks | New `harness.prompts.ImageRef` Pydantic model with `source: Literal["base64", "url"]`, `media_type`, `data`. `ContentBlock` gains `image: ImageRef \| None` and the literal `"image"` to its `BlockType`. `harness.prompts.attach_image(path=... \| url=..., media_type=...)` builds them — base64-encoding from disk and auto-inferring `media_type` from the extension when path-based; URL mode requires explicit `media_type`. Both runners translate: `AnthropicRunner` to `{"type":"image","source":{"type":"base64"\|"url","media_type":...,"data":...}}`; `OpenAICompatRunner` to `{"type":"image_url","image_url":{"url":...}}` parts (data URLs for inline base64). User messages with images become list-shaped `content` arrays so text + image mixing works in both vendor formats. Pre-Wave-12 text-only user messages stay string-shaped (back-compat). |
+| 8 | Anthropic Files API integration | `ContentBlock` gains `file_id: str \| None`. `attach_file(file_id="file_...")` builds a file block referencing an Anthropic Files API document by id. `AnthropicRunner` translates to `{"type":"document","source":{"type":"file","file_id":...}}`; the path-based mode keeps the historical text-inlining behavior. `OpenAICompatRunner` surfaces `file_id` as a `<file file_id=...>` text placeholder (no native equivalent). The upload helper (`upload_file(client, path) → file_id`) is **deferred** — needs API keys for an end-to-end smoke; users can call `client.beta.files.upload(...)` directly today. |
+| 9 | Streaming output | **Deferred to Wave 13a.** Per advisor review: streaming touches the `AnthropicRunner.__call__` hot path (tool-use loop, speculator begin/end, hook ordering, cache cap, timeout, replacement honoring) — a tail-of-wave attempt risks regressions across 500+ tests. The dedicated wave will add new event types (TextDelta / ToolUseStart / ToolUseEnd / MessageEnd), a `StreamingRunner` Protocol, `Orchestrator.run_stream()`, and a CLI `--stream` mode with explicit speculator-during-stream tests. |
 
 ### Tests added
 
 | File | Count | Coverage |
 | --- | --- | --- |
-| `tests/telemetry/test_correlation.py` | 8 | emit-without-scope leaves IDs None; `session_scope` attaches trace_id; caller-supplied trace_id; reset after exit; `span_scope` attaches span_id and inherits trace_id; nested span_scope records parent; concurrent sibling tasks don't collide; orchestrator + dispatcher integration (full trace + parent linkage). |
-| `tests/telemetry/test_otel.py` | +2 | correlation IDs ride as attributes; nested span_scope records `harness.parent_span_id`. |
-| `tests/debug/test_dap_cli.py` | 2 | end-to-end DAP CLI subprocess flow; session record JSON validation. |
+| `tests/prompts/test_image_and_files.py` | 16 | `attach_image` URL-mode + path-mode (with media_type inference, unrecognized-extension error, mutual exclusion); `attach_file(file_id=...)` block shape + mutual exclusion vs path; Anthropic translation for both image source modes + file_id document blocks + path-based fallback; OpenAI-compat data-URL conversion + URL passthrough + text-only string-shape preservation + file_id text fallback. |
 
-12 new tests, **522 total** (was 510). Coverage gate: 85% threshold,
-89% actual.
+16 new tests, **537 total** (was 521; +1 stress test surfaced earlier).
+Coverage stays at **89%** with the 85% threshold.
 
 ### Verification gate
 
 ```
 ruff check                       — clean
-ruff format --check             — 171 files clean
-mypy --strict src tests         — clean (157 source files)
-pytest --cov=harness            — 521 passed + 1 skipped, 89% coverage (gate 85%)
-mkdocs build --strict           — clean (~1s)
+ruff format --check             — 174 files clean
+mypy --strict src tests         — clean (159 source files)
+pytest --cov=harness            — 537 passed, 1 skipped, 89% coverage
+mkdocs build --strict           — clean
 uv build                         — wheel + sdist build cleanly
 ```
 
 ### Deferred from this wave
 
-- **Full OTel span-tree synthesis (#10 deeper)** — needs a custom
-  `IdGenerator` or `Span` construction APIs to round-trip harness
-  span_ids faithfully. The current attribute-promotion lands the
-  correlation data without the structural lie.
-- **Cassette pattern for vendor SDK shape drift (#19)** — needs
-  real-API recordings. Schedule it for a wave with credentials.
+- **Streaming output (#9)** — moved to Wave 13a. Estimated ~2 days
+  in its own wave: new event types, `StreamingRunner` Protocol,
+  `Orchestrator.run_stream()`, CLI `--stream` mode, speculator-
+  during-stream targeted test.
+- **Files API upload helper (`upload_file`)** — needs real API keys
+  for end-to-end smoke. Users can call `client.beta.files.upload`
+  directly via the SDK today; the harness side handles the resulting
+  `file_id` correctly.
 
 ### Commits
 
 ```
-*  feat(telemetry): trace_id + span_id + parent_span_id correlation
-*  feat(telemetry): OpenTelemetrySink promotes correlation IDs as attributes
-*  test(debug): subprocess-driven harness debug --dap end-to-end test
-*  feat(coverage): pytest-cov + 85% threshold gate in CI
-*  docs: progress.md log of Wave 11
+*  chore(progress): rotate Wave 11 to docs/waves/
+*  feat(prompts): vision content blocks + Anthropic Files API attachments
+*  feat(runner): translate image and file_id blocks in both vendor runners
+*  docs: CHANGELOG + plan.md split + progress.md log of Wave 12
 ```

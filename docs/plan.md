@@ -17,8 +17,9 @@ focused session with iteration).
 | 9  | CI/CD + governance + housekeeping | 1.5–2 days | #21, #22, #23, #24, #25, #26, #27, #28 |
 | 10 | Vendor runner parity + robustness | ~3 days | #3, #4, #5, #6, #12 |
 | 11 | Deeper observability + verification | ~3 days | #10, #11, #18, #19, #20 |
-| 12 | Modality + streaming | ~3.5 days | #7, #8, #9 |
-| 13 | Speculator/privacy/DAP polish | ~3 days | #1, #2, #15, #16, #17 |
+| 12 | Modality + Files API | ~1 day | #7, #8 |
+| 13a | Streaming output | ~2 days | #9 |
+| 13b | Speculator/privacy/DAP polish | ~3 days | #1, #2, #15, #16, #17 |
 
 Two items (#13 namespace `getattr`, #14 `FlowControlMixin`) are
 **persistent-monitoring**, not new waves — see the bottom of this

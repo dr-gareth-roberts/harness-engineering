@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `harness.prompts.ImageRef` (Wave 12 #7) and `attach_image(path|url, ...)`
+  helper. New `image` `ContentBlock.type` carries an `ImageRef` (base64
+  bytes or URL + media_type). `AnthropicRunner` translates to
+  `{"type":"image","source":{...}}` (both base64 and URL). The
+  OpenAI-compat path translates to `image_url` parts (data URLs for
+  inline base64). User messages with images become list-shaped
+  `content` arrays so text + image mixing works in both vendor
+  formats.
+- `attach_file(file_id="file_...")` (Wave 12 #8) — references an
+  Anthropic Files API document by id. `AnthropicRunner` translates
+  to a `{"type":"document","source":{"type":"file","file_id":...}}`
+  block. Path-based `attach_file(path=...)` continues to inline text
+  as before. OpenAI-compat surfaces file_ids as text placeholders.
 - `TelemetryEvent` gains `trace_id` / `span_id` / `parent_span_id`
   fields (Wave 11 #11) — propagated via the `Telemetry` recorder's
   new `session_scope()` and `span_scope()` async context managers
