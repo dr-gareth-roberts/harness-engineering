@@ -1154,3 +1154,73 @@ cdc16e4  chore: declare [fuzz] and [attribute] extras                    (pre-st
 *  feat: integrate Wave 1 — Orchestrator.telemetry + re-exports + progress
 ```
 
+---
+
+## Wave 2 — four runner-adjacent features in parallel
+
+### Goal
+Implement four of the remaining five standout features in parallel: #3 Prefix-drift watcher, #6 Privacy-boundary runner, #9 Plan-as-contract, #10 Live agent REPL debugger. **#5 Speculative tool execution is deferred to a later wave** — its implementation needs a streaming refactor of the runners (the SDK call path uses `get_final_message()` from the caller's perspective today), which is a research-grade unknown that doesn't belong inside a parallel-feature wave.
+
+These features share a different parallelism profile than Wave 1: three of the four wrap an existing `Runner` rather than create a new one (#6 privacy, #9 plan-as-contract, #10 debug), and the fourth (#3 cache) plugs into the runner via a single kwarg. None modify the runner's tool-use loop.
+
+### Status
+Shipped — four `feat/<name>` branches merged into `chore/initial-scaffold` with `--no-ff` merge commits; one commit pre-staged the cross-cutting infrastructure; one final commit integrates re-exports.
+
+### Approach
+
+**Pre-step on `chore/initial-scaffold` (single commit, `322e057`)** — lands the cross-cutting infrastructure so each agent works in pure new-module mode:
+
+- `src/harness/cli.py` — argparse subparser dispatcher. Each feature module that wants a CLI surface ships a `register(subparsers)` function in its own `cli.py`; the dispatcher discovers them lazily via `importlib.util.find_spec` (catching `ModuleNotFoundError` raised when a parent package is missing entirely, while letting real import-time failures surface from `import_module`). New features add their subcommand by adding their module path to `_SUBCOMMAND_MODULES` and shipping a `register`. Today: `harness.cache.cli` (cache-audit) + `harness.debug.cli` (debug).
+- `[project.scripts] harness = "harness.cli:main"` in `pyproject.toml`.
+- `src/harness/runner/protocols.py` — `PrefixWatcherProtocol` (structural). `harness.cache.PrefixWatcher` satisfies it; the runner stays vendor-SDK-only and doesn't import the cache module.
+- `AnthropicRunner.__init__` and `OpenAICompatRunner.__init__` accept `prefix_watcher: PrefixWatcherProtocol | None = None` and `speculator: object | None = None`. Each iteration of the tool-use loop calls `await self._prefix_watcher.fingerprint(request)` immediately before the SDK call when the watcher is present. The `speculator` slot is reserved for #5 so that feature can land later without a constructor signature change.
+- `harness.contracts` re-exports `DFA` + `compile_contract` publicly so #9 plan-as-contract composes them rather than reinventing the state machine.
+- `Tool.idempotent: bool = False` on the schema. Reserved for #5; ignored elsewhere.
+
+**Then dispatch four `general-purpose` agents in parallel via the agent runner's worktree-isolation mode**, with prompts following the same shape as Wave 1: spec section as binding source-of-truth, explicit "do not modify" list (`src/harness/__init__.py`, `pyproject.toml`, `uv.lock`, `README.md`, `progress.md`, `designs/standout.md`, the runner files, `src/harness/cli.py`), verification gates before declaring done, commit on a feature branch.
+
+### Per-feature summary
+
+| # | Module | LoC src + test | Tests | Branch | Notes |
+|---|--------|----------------|-------|--------|-------|
+| 3  | `harness.cache` | ~700 + ~660 | 28 ✓ | `feat/prefix-drift-watcher` | `PrefixWatcher` satisfies the runner's structural protocol; per-cache-breakpoint SHA-256 fingerprints on the rendered `messages`/`system`/`tools` segments; `FileFingerprintStore` writes JSONL; `audit(store, window_hours)` walks per-breakpoint hash sequences and emits `DriftEvent`s with `difflib.unified_diff` of full prompts when `full_capture="on_drift"`. `harness cache-audit --store <path> --since <duration>` ships as a CLI subcommand. OpenAI-compatible runner: single-segment fingerprint (no breakpoint markers in the SDK protocol). 18 supplementary tests beyond the spec's 10. |
+| 6  | `harness.privacy` | ~470 + ~660 | 22 ✓ | `feat/privacy-boundary` | `PrivacyBoundary(detectors, on_detect=..., audit_sink=...).wrap(real_runner)` returns a runner satisfying the same protocol. `RegexDetector` and `EntropyDetector` (Shannon entropy on `[A-Za-z0-9_+/=-]+` tokens). Pre-built `SECRET_PACK` (AWS / Anthropic / GitHub / Stripe keys), `PII_PACK` (US SSN / phone / email), `HIPAA_PACK`. Per-detector `direction` (outbound / inbound / both) and `action` (redact / block / audit). `DetectionEvent` carries `name`, `direction`, `action`, `location`, `match_length`, `timestamp_utc` — never the detected value (verified by walking every field of `event.model_dump()` in test 8). |
+| 9  | `harness.plan` | ~430 + ~770 | 26 ✓ | `feat/plan-as-contract` | `Plan` is a Pydantic model serializable to JSON. `Plan.to_contracts()` returns `[Contract(pattern=Always(HasToolUse(...) & ArgMatches(...)))]` per `PlannedToolCall`. `PlanGuardedRunner._compile_step_dfa` calls `compile_contract(self._contracts[step_index])` — the contracts DFA is the substrate, not reimplemented. Three modes: `strict` / `superset` / `subset`. `derive_plan(planner_agent, planner_runner, messages)` asks a planner to emit JSON; `Plan.model_validate_json` parses. Callable matchers stay out of the Pydantic schema (would not serialize) — the predicate-subclass path is documented and tested. |
+| 10 | `harness.debug` | ~620 + ~1100 | 64 ✓ | `feat/debug-repl` | `DebugRunner(real_runner, *, break_on, breakpoint_callback OR interactive)` wraps any runner; satisfies the runner protocol. `DebugContext` exposes `.messages` / `.last_call` / `.turn_index` and queues `mutate(...)` / `fire(tool, args)` / `inspect(...)` / `resume()` / `abort()`. Interactive REPL is a small `cmd`-flavored loop driven by configurable streams — tests inject `io.StringIO` and `monkeypatch` instead of a `pexpect` dependency (which the spec mentioned but we elected not to take). `harness debug <session> --break <spec>` loads a recorded `SessionRecord` (`.json` or `.jsonl`), replays through `ReplayRunner`, breaks at `turn=N` or `tool=NAME`, drops to the REPL. |
+
+Total Wave 2: ~2 220 src + ~3 190 test, **140 new tests**. Plus the pre-step (Wave 2 cli.py + protocols.py + 32 lines of edits across 5 files); 0 logic conflicts at merge (one expected-and-handled `cli.py` + `pyproject.toml` conflict for #10, where the agent recreated the pre-step files because their worktree initialization captured an earlier base; resolved at integration by keeping the pre-step versions, which already register #10's subcommand).
+
+### Integration
+
+- **Top-level re-exports** added for the headline entry points across all four features: `PrefixWatcher` / `FileFingerprintStore` / `DriftEvent` / `DriftReport`; `PrivacyBoundary` / `PrivacyViolation` / `RegexDetector` / `EntropyDetector` / `SECRET_PACK` / `PII_PACK`; `Plan` / `PlannedToolCall` / `PlanGuardedRunner` / `PlanViolation`; `DebugRunner` / `DebugContext`. Inner types (predicates, similarity protocols, individual detector packs, REPL helpers, etc.) remain at subpackage level.
+- **Conflict resolution on `feat/debug-repl`**: the agent's worktree captured a base older than the Wave 2 pre-step (their `pyproject.toml` lacked the `[fuzz]` and `[attribute]` extras Wave 1 added, and they recreated `cli.py` from scratch). At merge, kept the pre-step's `cli.py` (which registers BOTH `harness.cache.cli` and `harness.debug.cli` in `_SUBCOMMAND_MODULES`) and the pre-step's `[project.scripts]` block; deduplicated the auto-merged `[project.scripts]` table. Their new files (`src/harness/debug/*` and `tests/debug/*`) merged cleanly.
+- **CLI surface verified**: `uv run harness --help` lists `cache-audit` and `debug`; `uv run harness cache-audit --help` and `uv run harness debug --help` both render their subparsers.
+
+### Verification
+
+- `uv sync --extra dev --extra anthropic --extra openai-compat --extra fuzz` — clean. (`[attribute]` still deliberately not installed.)
+- `uv run pytest -q` — **369 passed, 1 skipped** in 1.48 s. (Was 229; +28 cache, +22 privacy, +26 plan, +64 debug.)
+- `uv run mypy` — clean (strict, 73 source files).
+- `uv run ruff check .` — clean across `src/`, `tests/`, `examples/`.
+- `uv run python examples/end_to_end.py` — runs to completion; no top-level import regressions.
+- Top-level surface importable: `from harness import PrefixWatcher, PrivacyBoundary, Plan, PlanGuardedRunner, DebugRunner, ...` resolves.
+
+### Follow-ups (explicitly deferred)
+
+- **#5 Speculative tool execution.** Deliberately deferred until the runner streaming path is refactored. Wave 2's pre-step already accepts a `speculator` kwarg (typed `object | None`) on both runners, so #5 lands without re-touching their constructor signatures. `Tool.idempotent: bool = False` is similarly pre-staged.
+- **Privacy boundary scope.** v1 scans `type == "text"` blocks only; `tool_result.content` and `tool_use.arguments` are not scanned in the inbound path even though the spec body mentions both. None of the 12 numbered tests cover those, but it's an acknowledged limitation in the boundary module docstring.
+- **Privacy `on_detect` boundary default.** Every shipped detector specifies its own `action`; the boundary-level `on_detect` default is currently latent. Extension hook for future per-detector-default fallback semantics.
+- **Wave 3 work** beyond #5: README updates for the new modules, push to remote, an example or two under `examples/` exercising privacy + plan + debug flows, formatting sweep on the ~10 pre-existing files that pre-date Wave 1.
+
+### Commits
+
+```
+322e057  chore: Wave 2 pre-step — CLI scaffold + runner extension points  (pre-step)
+*  Merge feat/prefix-drift-watcher (#3)
+*  Merge feat/privacy-boundary (#6)
+*  Merge feat/plan-as-contract (#9)
+*  Merge feat/debug-repl (#10)            (cli.py + pyproject.toml conflicts; took pre-step versions)
+*  feat: integrate Wave 2 — top-level re-exports + progress
+```
+
+

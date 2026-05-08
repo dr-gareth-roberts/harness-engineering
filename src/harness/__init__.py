@@ -10,6 +10,12 @@ from harness.attribute import (
     LengthRatio,
     attribute,
 )
+from harness.cache import (
+    DriftEvent,
+    DriftReport,
+    FileFingerprintStore,
+    PrefixWatcher,
+)
 from harness.contracts import (
     Contract,
     ContractViolation,
@@ -17,10 +23,20 @@ from harness.contracts import (
     attach_contracts,
     check,
 )
+from harness.debug import DebugContext, DebugRunner
 from harness.fuzz import FuzzReport, fuzz_agent, fuzz_tool, harness_property
 from harness.hooks import HookRunner
 from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
+from harness.plan import Plan, PlanGuardedRunner, PlannedToolCall, PlanViolation
 from harness.policy import AllowList, DenyList
+from harness.privacy import (
+    PII_PACK,
+    SECRET_PACK,
+    EntropyDetector,
+    PrivacyBoundary,
+    PrivacyViolation,
+    RegexDetector,
+)
 from harness.prompts import Message
 from harness.replay import (
     DeleteTurn,
@@ -55,12 +71,18 @@ __all__ = [
     "CannedRunner",
     "Contract",
     "ContractViolation",
+    "DebugContext",
+    "DebugRunner",
     "DeleteTurn",
     "DenyList",
     "DiffMatrix",
     "DiffOutlier",
     "Dispatcher",
+    "DriftEvent",
+    "DriftReport",
     "EchoRunner",
+    "EntropyDetector",
+    "FileFingerprintStore",
     "FileStore",
     "FuzzReport",
     "HookRunner",
@@ -74,11 +96,21 @@ __all__ = [
     "Mutation",
     "OpenAICompatRunner",
     "Orchestrator",
+    "PII_PACK",
     "PathPolicy",
     "PathScope",
+    "Plan",
+    "PlanGuardedRunner",
+    "PlanViolation",
+    "PlannedToolCall",
+    "PrefixWatcher",
+    "PrivacyBoundary",
+    "PrivacyViolation",
+    "RegexDetector",
     "ReplaceToolResult",
     "ReplayRunner",
     "RewriteTurn",
+    "SECRET_PACK",
     "Session",
     "SessionRecord",
     "SubAgent",
