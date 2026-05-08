@@ -73,10 +73,15 @@ class FakeMessage:
 
 
 class _FakeStream:
-    def __init__(self, response: FakeMessage) -> None:
+    def __init__(self, response: FakeMessage, *, enter_delay: float = 0.0) -> None:
         self._response = response
+        self._enter_delay = enter_delay
 
     async def __aenter__(self) -> _FakeStream:
+        if self._enter_delay > 0:
+            import asyncio
+
+            await asyncio.sleep(self._enter_delay)
         return self
 
     async def __aexit__(
@@ -102,19 +107,25 @@ class _FakeStream:
 
 
 class FakeMessages:
-    def __init__(self, responses: list[FakeMessage]) -> None:
+    def __init__(self, responses: list[FakeMessage], *, enter_delay: float = 0.0) -> None:
         self._responses = list(responses)
+        self._enter_delay = enter_delay
         self.requests: list[dict[str, Any]] = []
 
     def stream(self, **kwargs: Any) -> _FakeStream:
         if not self._responses:
             raise RuntimeError("FakeMessages: no canned responses left for stream() call")
         self.requests.append(kwargs)
-        return _FakeStream(self._responses.pop(0))
+        return _FakeStream(self._responses.pop(0), enter_delay=self._enter_delay)
 
 
 class FakeAsyncAnthropic:
-    """Stand-in for `anthropic.AsyncAnthropic` with a scriptable `messages.stream`."""
+    """Stand-in for `anthropic.AsyncAnthropic` with a scriptable `messages.stream`.
 
-    def __init__(self, responses: list[FakeMessage]) -> None:
-        self.messages = FakeMessages(responses)
+    `enter_delay` lets tests inject a sleep into `messages.stream(...)`'s
+    `__aenter__` to drive timeout-related behavior. Default 0 = no sleep,
+    matches the prior tests.
+    """
+
+    def __init__(self, responses: list[FakeMessage], *, enter_delay: float = 0.0) -> None:
+        self.messages = FakeMessages(responses, enter_delay=enter_delay)

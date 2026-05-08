@@ -6,17 +6,23 @@ for tool execution and fires `PreToolUse` / `PostToolUse` events around each
 dispatch — so `harness.policy` policies attached as hooks Just Work.
 
 Caveats:
-- `HookDecision.replacement` is ignored; only `block` is honoured.
-- `cache_control` is rendered 1:1 from `ContentBlock.cache=True`. Anthropic
-  caps the request at 4 cache breakpoints; the runner does not enforce that
-  cap. Use `compact()` or trim the prefix before calling.
-- `pause_turn` and `refusal` stop reasons surface as `RuntimeError`.
+- `HookDecision` honors `block` (short-circuit to is_error result) and
+  `replacement` (PreToolUse: skip dispatch, use supplied result;
+  PostToolUse: rewrite the dispatched result before sending back).
+- `cache_control` is rendered 1:1 from `ContentBlock.cache=True`. The runner
+  enforces Anthropic's 4-cache-breakpoint cap client-side: a request with
+  more raises `CacheBreakpointLimitExceeded` *before* the SDK call,
+  surfacing the failure at the harness boundary instead of the API boundary.
+- `pause_turn` and `refusal` stop reasons fire `PauseTurn` / `Refusal`
+  hook events and the partial assistant message is returned. Callers
+  can register hooks to react (re-invoke on pause, log on refusal).
 - File blocks are inlined as text (`<file path=...>\n...\n</file>`); Files API
   integration is deferred.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Literal
 
@@ -30,7 +36,13 @@ except ImportError as exc:
     ) from exc
 
 from harness.agents.definition import SubAgent
-from harness.hooks.events import PostAssistantMessage, PostToolUse, PreToolUse
+from harness.hooks.events import (
+    PauseTurn,
+    PostAssistantMessage,
+    PostToolUse,
+    PreToolUse,
+    Refusal,
+)
 from harness.hooks.runner import HookRunner
 from harness.prompts.messages import ContentBlock, Message
 from harness.runner.protocols import PrefixWatcherProtocol, SpeculatorProtocol
@@ -39,6 +51,41 @@ from harness.tools.schema import ToolCall, ToolResult
 
 ThinkingMode = Literal["adaptive", "disabled"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+# Anthropic's API caps each request at this many `cache_control` markers
+# across all messages + system blocks. Going over yields a 400 from the
+# API; we surface it client-side as a typed exception instead.
+_CACHE_BREAKPOINT_LIMIT = 4
+
+
+class CacheBreakpointLimitExceeded(ValueError):
+    """The translated request carries more than 4 `cache_control` markers.
+
+    The Anthropic API rejects such requests; this exception surfaces the
+    failure at the harness boundary so the caller gets a clear, typed
+    error instead of an opaque 400. The message names the count we
+    saw and points at `harness.prompts.compact` (or trimming
+    `ContentBlock.cache=True` markers) as the resolution.
+    """
+
+
+def _count_cache_breakpoints(request: dict[str, Any]) -> int:
+    """Count `cache_control` markers in the translated request shape.
+
+    Walks every message's content list looking for blocks with a
+    `cache_control` key. The runner's `_translate_block_in` is the only
+    place these markers are emitted, so the count is exact.
+    """
+    total = 0
+    for msg in request.get("messages", []):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and "cache_control" in block:
+                total += 1
+    return total
 
 
 def _serialize_tool_content(content: Any) -> str:
@@ -146,6 +193,7 @@ class AnthropicRunner:
         max_iterations: int = 10,
         prefix_watcher: PrefixWatcherProtocol | None = None,
         speculator: SpeculatorProtocol | None = None,
+        timeout_s: float | None = None,
     ) -> None:
         self.dispatcher = dispatcher
         self.hooks = hooks
@@ -156,6 +204,15 @@ class AnthropicRunner:
         self._max_iterations = max_iterations
         self._prefix_watcher = prefix_watcher
         self._speculator = speculator
+        # Per-iteration timeout. None = no timeout (default; matches the
+        # SDK's own behavior). When set, the entire stream-and-iterate
+        # phase per iteration is wrapped in `asyncio.wait_for`. Note this
+        # is per *iteration*, not per *call* — a 5s timeout on a tool-use
+        # loop with 3 iterations gives the model up to 15s wall-clock
+        # total. Retry/backoff is intentionally deferred (Wave 10 +
+        # streaming + speculator state make a clean retry semantic
+        # non-trivial; see docs/plan.md).
+        self._timeout_s = timeout_s
 
     def _build_request(
         self,
@@ -197,6 +254,19 @@ class AnthropicRunner:
         running_history: list[Message] = list(messages)
 
         for _ in range(self._max_iterations):
+            # Surface the cache-breakpoint cap before any IO so the caller
+            # gets a clear typed error instead of an opaque API 400. Per
+            # iteration because tool_results we feed back may themselves
+            # carry `cache_control`.
+            count = _count_cache_breakpoints(request)
+            if count > _CACHE_BREAKPOINT_LIMIT:
+                raise CacheBreakpointLimitExceeded(
+                    f"Anthropic caps cache breakpoints at "
+                    f"{_CACHE_BREAKPOINT_LIMIT}; got {count}. "
+                    "Remove some `ContentBlock.cache=True` markers, or "
+                    "use `harness.prompts.compact` to trim the prefix."
+                )
+
             if self._prefix_watcher is not None:
                 await self._prefix_watcher.fingerprint(request)
 
@@ -209,7 +279,7 @@ class AnthropicRunner:
                 )
 
             try:
-                async with self._client.messages.stream(**request) as stream:
+                async with self._stream_with_timeout(request) as stream:
                     # Iterate the stream's high-level events as they
                     # arrive. The only one we react to is
                     # `content_block_stop` for `tool_use` blocks —
@@ -252,10 +322,26 @@ class AnthropicRunner:
                 if response.stop_reason in ("end_turn", "stop_sequence"):
                     return assistant_message
 
+                if response.stop_reason == "pause_turn":
+                    # Server-side pause (typically a long-running tool
+                    # exceeded the per-turn budget). Surface as an event
+                    # and return the partial assistant message; the caller
+                    # can re-invoke with this message appended to resume.
+                    await self.hooks.emit(PauseTurn(message=assistant_message, reason="pause_turn"))
+                    return assistant_message
+
+                if response.stop_reason == "refusal":
+                    # The model refused. Surface as an event and return
+                    # the refusal-only assistant message; the caller can
+                    # inspect blocks and decide what to do.
+                    await self.hooks.emit(Refusal(message=assistant_message))
+                    return assistant_message
+
                 if response.stop_reason != "tool_use":
                     raise RuntimeError(
                         f"Unexpected stop_reason from model: {response.stop_reason!r}. "
-                        "AnthropicRunner does not handle 'pause_turn' or 'refusal' yet."
+                        "Known reasons handled: end_turn, stop_sequence, tool_use, "
+                        "pause_turn, refusal."
                     )
 
                 request["messages"] = [
@@ -281,17 +367,50 @@ class AnthropicRunner:
                     if speculative_result is not None:
                         result = speculative_result
                     else:
-                        decisions = await self.hooks.emit(PreToolUse(call=call))
-                        blocked = next((d for d in decisions if d.block), None)
+                        pre_decisions = await self.hooks.emit(PreToolUse(call=call))
+                        # PreToolUse hook decisions: `block` short-circuits to
+                        # an is_error result; `replacement=ToolResult(...)`
+                        # short-circuits dispatch with the supplied result
+                        # (id patched to the model's call id). First matching
+                        # decision wins.
+                        blocked = next((d for d in pre_decisions if d.block), None)
+                        replaced = next(
+                            (d for d in pre_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
                         if blocked is not None:
                             result = ToolResult(
                                 id=block.id,
                                 content=blocked.reason or "blocked by hook",
                                 is_error=True,
                             )
+                        elif replaced is not None:
+                            assert isinstance(replaced.replacement, ToolResult)
+                            result = ToolResult(
+                                id=block.id,
+                                content=replaced.replacement.content,
+                                is_error=replaced.replacement.is_error,
+                            )
                         else:
                             result = await self.dispatcher.dispatch(call)
-                        await self.hooks.emit(PostToolUse(call=call, result=result))
+
+                        post_decisions = await self.hooks.emit(
+                            PostToolUse(call=call, result=result)
+                        )
+                        # PostToolUse can rewrite the result before it goes
+                        # back to the model — typical use is sanitization
+                        # (redact secrets in the result, normalize errors).
+                        post_replacement = next(
+                            (d for d in post_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
+                        if post_replacement is not None:
+                            assert isinstance(post_replacement.replacement, ToolResult)
+                            result = ToolResult(
+                                id=block.id,
+                                content=post_replacement.replacement.content,
+                                is_error=post_replacement.replacement.is_error,
+                            )
 
                     tool_result_blocks.append(
                         {
@@ -320,3 +439,63 @@ class AnthropicRunner:
             f"Tool-use loop exceeded max_iterations={self._max_iterations}. "
             "Increase the cap, constrain the tool surface, or shorten the conversation."
         )
+
+    def _stream_with_timeout(self, request: dict[str, Any]) -> Any:
+        """Return a stream context manager, optionally wrapped in a timeout.
+
+        When `timeout_s` is None we hand back the SDK's own context manager
+        unchanged. When set, we wrap entry + exit + iteration in
+        `asyncio.wait_for` via a small adapter. Keeping the wrap in a
+        helper rather than inlining it keeps the iteration loop body
+        readable.
+        """
+        ctx = self._client.messages.stream(**request)
+        if self._timeout_s is None:
+            return ctx
+        return _TimeoutStreamCtx(ctx, self._timeout_s)
+
+
+class _TimeoutStreamCtx:
+    """Wraps an Anthropic stream context manager with a per-iteration timeout.
+
+    `asyncio.wait_for` enforces the deadline on every awaited operation
+    (`__aenter__`, every `async for` step inside, `__aexit__`). If the
+    deadline expires the SDK call is cancelled and `TimeoutError` bubbles
+    up so the caller can decide whether to retry / give up.
+    """
+
+    def __init__(self, inner: Any, timeout_s: float) -> None:
+        self._inner = inner
+        self._timeout_s = timeout_s
+        self._stream: Any | None = None
+
+    async def __aenter__(self) -> Any:
+        self._stream = await asyncio.wait_for(self._inner.__aenter__(), timeout=self._timeout_s)
+        return _TimeoutStream(self._stream, self._timeout_s)
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
+        try:
+            return await asyncio.wait_for(
+                self._inner.__aexit__(exc_type, exc, tb), timeout=self._timeout_s
+            )
+        except TimeoutError:
+            # The inner stream is being torn down; swallow the timeout
+            # rather than masking the original exception (if any).
+            return False
+
+
+class _TimeoutStream:
+    """Iterator wrapper that applies the timeout to each `__anext__` call."""
+
+    def __init__(self, inner: Any, timeout_s: float) -> None:
+        self._inner = inner
+        self._timeout_s = timeout_s
+
+    def __aiter__(self) -> _TimeoutStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        return await asyncio.wait_for(self._inner.__anext__(), timeout=self._timeout_s)
+
+    async def get_final_message(self) -> Any:
+        return await asyncio.wait_for(self._inner.get_final_message(), timeout=self._timeout_s)

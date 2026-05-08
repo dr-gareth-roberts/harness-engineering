@@ -11,6 +11,7 @@ from harness.agents import SubAgent
 from harness.hooks import HookRunner, PostToolUse, PreToolUse
 from harness.policy import AllowList, attach_pre_tool_policies
 from harness.prompts import Message, attach_file, text
+from harness.prompts.messages import ContentBlock
 from harness.runner.anthropic import (
     AnthropicRunner,
     _serialize_tool_content,
@@ -190,12 +191,15 @@ async def test_max_iterations_cap_raises() -> None:
 
 
 async def test_unexpected_stop_reason_raises() -> None:
-    response = FakeMessage(content=[FakeTextBlock(text="...")], stop_reason="refusal")
+    """A genuinely unknown stop_reason still raises — pause_turn and
+    refusal are now handled (surfaced via events), but anything else
+    is a runner-level surprise and should fail loudly."""
+    response = FakeMessage(content=[FakeTextBlock(text="...")], stop_reason="content_filter")
     client = FakeAsyncAnthropic(responses=[response])
     dispatcher, _ = _echo_dispatcher()
     runner = AnthropicRunner(dispatcher, HookRunner(), client=client)  # type: ignore[arg-type]
 
-    with pytest.raises(RuntimeError, match="refusal"):
+    with pytest.raises(RuntimeError, match="content_filter"):
         await runner(_agent(), [text("user", "x")])
 
 
@@ -494,7 +498,10 @@ async def test_speculator_end_fires_even_when_runner_raises() -> None:
     """`begin` and `end` must be paired. If the SDK call (or anything else
     in the iteration) raises, end still fires so the speculator can clean up
     its background tasks."""
-    bad_response = FakeMessage(content=[], stop_reason="refusal")  # unhandled
+    # Use a genuinely unhandled stop_reason — `refusal` is now a known
+    # reason that surfaces as an event (no exception), so it wouldn't
+    # exercise the begin/end-on-error path this test pins.
+    bad_response = FakeMessage(content=[], stop_reason="content_filter")
     client = FakeAsyncAnthropic(responses=[bad_response])
     dispatcher, _ = _echo_dispatcher()
     spec = _StubSpeculator()
@@ -761,3 +768,265 @@ async def test_unobserved_speculation_does_not_complete_when_dispatch_diverges()
     # version of the win).
     assert "actual:run" in events
     assert "predicted:done" not in events
+
+
+# ---------------------------------------------------------------------------
+# Wave 10 #12: cache-breakpoint cap
+
+
+def test_count_cache_breakpoints_walks_message_content() -> None:
+    """Pin the counting helper directly — independent of the runner so we
+    can iterate on the API shape without re-running the full integration."""
+    from harness.runner.anthropic import _count_cache_breakpoints
+
+    request = {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": "b"},
+                    {"type": "text", "text": "c", "cache_control": {"type": "ephemeral"}},
+                ],
+            },
+        ],
+    }
+    assert _count_cache_breakpoints(request) == 2
+
+
+def test_count_cache_breakpoints_tolerates_missing_or_string_content() -> None:
+    """Non-list `content` (string-shaped messages, missing field) shouldn't
+    crash the counter — it should just contribute zero."""
+    from harness.runner.anthropic import _count_cache_breakpoints
+
+    request = {
+        "messages": [
+            {"role": "system", "content": "string-shaped"},
+            {"role": "user"},  # no content field at all
+        ],
+    }
+    assert _count_cache_breakpoints(request) == 0
+
+
+async def test_runner_raises_cache_breakpoint_limit_exceeded_at_five() -> None:
+    """Five cache markers across user messages — runner raises BEFORE
+    making the SDK call so the caller gets a typed error, not an API 400."""
+    from harness.runner.anthropic import CacheBreakpointLimitExceeded
+
+    response = FakeMessage(
+        content=[FakeTextBlock(text="ok")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    # Five separate user messages, each carrying one cache_control marker.
+    messages = [
+        Message(
+            role="user",
+            content=[ContentBlock(type="text", text=f"chunk-{i}", cache=True)],
+        )
+        for i in range(5)
+    ]
+
+    with pytest.raises(CacheBreakpointLimitExceeded, match="caps cache breakpoints at 4"):
+        await runner(_agent(), messages)
+
+    # SDK call never happened — fake's recorded requests stay empty.
+    assert client.messages.requests == []
+
+
+async def test_runner_accepts_exactly_four_cache_breakpoints() -> None:
+    """Boundary case: 4 markers (the documented cap) is allowed."""
+    response = FakeMessage(
+        content=[FakeTextBlock(text="ok")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    messages = [
+        Message(
+            role="user",
+            content=[ContentBlock(type="text", text=f"chunk-{i}", cache=True)],
+        )
+        for i in range(4)
+    ]
+
+    # Should not raise.
+    result = await runner(_agent(), messages)
+    assert isinstance(result, Message)
+
+
+# ---------------------------------------------------------------------------
+# Wave 10 #6: per-iteration timeout
+
+
+async def test_runner_timeout_raises_when_stream_takes_too_long() -> None:
+    """timeout_s wraps the stream's __aenter__ in asyncio.wait_for. A
+    fake stream that sleeps longer than the timeout raises TimeoutError."""
+    response = FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")
+    # 200ms enter delay vs 50ms timeout — timeout wins.
+    client = FakeAsyncAnthropic(responses=[response], enter_delay=0.2)
+    dispatcher, _ = _echo_dispatcher()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        timeout_s=0.05,
+    )
+
+    with pytest.raises(TimeoutError):
+        await runner(_agent(), [text("user", "hello")])
+
+
+async def test_runner_no_timeout_completes_normally_with_slow_stream() -> None:
+    """timeout_s=None (default) lets a slow stream finish — no wait_for wrap."""
+    response = FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")
+    client = FakeAsyncAnthropic(responses=[response], enter_delay=0.05)
+    dispatcher, _ = _echo_dispatcher()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        # timeout_s=None
+    )
+
+    result = await runner(_agent(), [text("user", "hello")])
+    assert isinstance(result, Message)
+
+
+# ---------------------------------------------------------------------------
+# Wave 10 #5: HookDecision.replacement
+
+
+async def test_pre_tool_use_replacement_skips_dispatch_and_uses_supplied_result() -> None:
+    """A PreToolUse hook returning HookDecision(replacement=ToolResult(...))
+    short-circuits the runner's dispatch — the supplied result goes back
+    to the model with the model's tool_use.id patched in."""
+    from harness.hooks.events import HookDecision
+
+    tool_use = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "hi"})
+    response_1 = FakeMessage(content=[tool_use], stop_reason="tool_use")
+    response_2 = FakeMessage(content=[FakeTextBlock(text="done")], stop_reason="end_turn")
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, dispatch_log = _echo_dispatcher()
+
+    hooks = HookRunner()
+    hooks.register(
+        PreToolUse,
+        lambda e: HookDecision(replacement=ToolResult(content="injected", is_error=False)),
+    )
+
+    runner = AnthropicRunner(dispatcher, hooks, client=client)  # type: ignore[arg-type]
+    await runner(_agent(), [text("user", "echo hi")])
+
+    # Dispatcher's handler never ran — replacement short-circuited.
+    assert dispatch_log == []
+    # The injected result was sent back to the model with id=tu_1.
+    second = client.messages.requests[1]
+    tool_result_block = second["messages"][-1]["content"][0]
+    assert tool_result_block["tool_use_id"] == "tu_1"
+    assert tool_result_block["content"] == "injected"
+    assert tool_result_block["is_error"] is False
+
+
+async def test_post_tool_use_replacement_rewrites_result_before_model_sees_it() -> None:
+    """A PostToolUse hook returning HookDecision(replacement=ToolResult(...))
+    rewrites the dispatched result. Typical use is sanitization."""
+    from harness.hooks.events import HookDecision
+
+    tool_use = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "secret-data"})
+    response_1 = FakeMessage(content=[tool_use], stop_reason="tool_use")
+    response_2 = FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, dispatch_log = _echo_dispatcher()
+
+    hooks = HookRunner()
+    hooks.register(
+        PostToolUse,
+        lambda e: HookDecision(
+            replacement=ToolResult(content="[REDACTED]", is_error=False),
+        ),
+    )
+
+    runner = AnthropicRunner(dispatcher, hooks, client=client)  # type: ignore[arg-type]
+    await runner(_agent(), [text("user", "echo")])
+
+    # Dispatcher DID run (we wanted the side effect).
+    assert dispatch_log == ["secret-data"]
+    # But the model sees the redacted version, not the raw output.
+    second = client.messages.requests[1]
+    tool_result_block = second["messages"][-1]["content"][0]
+    assert tool_result_block["content"] == "[REDACTED]"
+
+
+# ---------------------------------------------------------------------------
+# Wave 10 #4: pause_turn / refusal as events
+
+
+async def test_pause_turn_emits_event_and_returns_partial_message() -> None:
+    """A stop_reason of `pause_turn` no longer raises. The runner emits a
+    PauseTurn event and returns the partial assistant message; the caller
+    can re-invoke with this message in history to resume."""
+    from harness.hooks import PauseTurn
+
+    response = FakeMessage(
+        content=[FakeTextBlock(text="working on it")],
+        stop_reason="pause_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+
+    seen: list[PauseTurn] = []
+    hooks = HookRunner()
+    hooks.register(PauseTurn, lambda e: seen.append(e))
+
+    runner = AnthropicRunner(dispatcher, hooks, client=client)  # type: ignore[arg-type]
+    result = await runner(_agent(), [text("user", "do a long thing")])
+
+    assert isinstance(result, Message)
+    assert result.content[0].text == "working on it"
+    assert len(seen) == 1
+    assert seen[0].message is result
+    assert seen[0].reason == "pause_turn"
+
+
+async def test_refusal_emits_event_and_returns_refusal_message() -> None:
+    """A stop_reason of `refusal` no longer raises. The runner emits a
+    Refusal event and returns the refusal-only assistant message."""
+    from harness.hooks import Refusal
+
+    response = FakeMessage(
+        content=[FakeTextBlock(text="I can't help with that.")],
+        stop_reason="refusal",
+    )
+    client = FakeAsyncAnthropic(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+
+    seen: list[Refusal] = []
+    hooks = HookRunner()
+    hooks.register(Refusal, lambda e: seen.append(e))
+
+    runner = AnthropicRunner(dispatcher, hooks, client=client)  # type: ignore[arg-type]
+    result = await runner(_agent(), [text("user", "do a thing")])
+
+    assert isinstance(result, Message)
+    assert "can't help" in (result.content[0].text or "")
+    assert len(seen) == 1
+    assert seen[0].message is result
