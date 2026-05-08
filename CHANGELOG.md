@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TelemetryEvent` gains `trace_id` / `span_id` / `parent_span_id`
+  fields (Wave 11 #11) — propagated via the `Telemetry` recorder's
+  new `session_scope()` and `span_scope()` async context managers
+  using `contextvars`. The orchestrator opens both per `run()`; the
+  dispatcher opens a `span_scope` per `dispatch()`. Concurrent
+  dispatches across `asyncio.gather` get distinct span_ids.
+- `OpenTelemetrySink` promotes the new correlation IDs as
+  `harness.trace_id` / `harness.span_id` / `harness.parent_span_id`
+  attributes on the OTel event (Wave 11 #10) — events grouped by
+  harness session correlate in Jaeger / Tempo / Honeycomb. Full span-
+  tree synthesis is documented as deferred (would need a custom
+  `IdGenerator` to round-trip the harness IDs faithfully).
+- `tests/debug/test_dap_cli.py` (Wave 11 #18) — subprocess-driven
+  end-to-end test of `harness debug --dap`. Validates the
+  `connect_read_pipe` / `connect_write_pipe` plumbing the CLI uses
+  for real editor integrations.
+- Coverage tooling (Wave 11 #20) — `pytest-cov` is now in `[dev]`
+  extras; CI runs `pytest --cov=harness` and gates on a configurable
+  threshold (`fail_under = 85` in `pyproject.toml`, currently
+  reporting **89%**).
 - `harness.runner.anthropic.CacheBreakpointLimitExceeded` (Wave 10 #12) —
   raised when a request would exceed Anthropic's 4-cache-breakpoint cap,
   surfacing the failure at the harness boundary rather than as an
