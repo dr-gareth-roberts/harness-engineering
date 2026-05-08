@@ -63,7 +63,9 @@ jobs:
         run: uv run mypy --strict src tests
 
       - name: pytest
-        run: uv run pytest -q
+        # `--cov` enables coverage collection (configured in pyproject.toml).
+        # The `fail_under = 85` threshold there gates on a drop.
+        run: uv run pytest -q --cov=harness
 
       - name: mkdocs build (strict)
         run: uv run mkdocs build --strict

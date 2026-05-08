@@ -15,4 +15,6 @@ __pycache__/
 .vscode/
 .claude/
 site/
+.coverage
+htmlcov/
 

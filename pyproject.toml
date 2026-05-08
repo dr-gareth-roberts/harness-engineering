@@ -15,6 +15,7 @@ dependencies = ["pydantic>=2.6"]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
+  "pytest-cov>=5",
   "ruff>=0.5",
   "mypy>=1.10",
 ]
@@ -38,6 +39,28 @@ packages = ["src/harness"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/harness"]
+
+[tool.coverage.report]
+# We don't gate every reach into vendor SDK try/except branches —
+# they only fire when the user installs the package without the
+# matching extra and calls the import path. Branch coverage is on
+# globally; these `if TYPE_CHECKING:` and `pragma: no cover` markers
+# carry the load.
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@(abc\\.)?abstractmethod",
+  "pragma: no cover",
+]
+# Fail the run if total coverage drops below this threshold. Bumped
+# upward when we add tests; lowered only with explicit justification.
+fail_under = 85
+show_missing = true
+skip_covered = false
 
 [tool.ruff]
 line-length = 100

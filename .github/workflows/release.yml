@@ -53,7 +53,7 @@ jobs:
       - run: uv run ruff check src tests examples
       - run: uv run ruff format --check src tests examples
       - run: uv run mypy --strict src tests
-      - run: uv run pytest -q
+      - run: uv run pytest -q --cov=harness
       - run: uv run mkdocs build --strict
 
   build-and-publish:
