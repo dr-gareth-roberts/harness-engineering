@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-flight runs on the same ref when a new push lands —
+# saves CI minutes on rapid iteration.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: gate (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          # Pin the uv version so a uv release doesn't silently change
+          # CI behavior. Bump deliberately when needed.
+          version: "0.5.x"
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+
+      - name: Sync dependencies
+        # All extras the gate needs to validate. We don't include `attribute`
+        # in CI because sentence-transformers pulls torch (~1GB), and the
+        # module's lazy-import contract is verified by the dual-state mypy
+        # test rather than by running CI with it installed.
+        run: |
+          uv sync \
+            --python ${{ matrix.python }} \
+            --extra dev \
+            --extra anthropic \
+            --extra openai-compat \
+            --extra otel \
+            --extra fuzz \
+            --extra docs
+
+      - name: ruff check
+        run: uv run ruff check src tests examples
+
+      - name: ruff format check
+        run: uv run ruff format --check src tests examples
+
+      - name: mypy strict (src + tests)
+        run: uv run mypy --strict src tests
+
+      - name: pytest
+        run: uv run pytest -q
+
+      - name: mkdocs build (strict)
+        run: uv run mkdocs build --strict
+
+      - name: uv build
+        # Verifies wheel + sdist build cleanly with the current source tree.
+        # Catches packaging-level breakage that tests would miss (e.g.,
+        # missing files in the wheel because hatchling didn't pick them up).
+        run: uv build

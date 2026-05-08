@@ -1,0 +1,88 @@
+name: Release
+
+# Tag-triggered. Build wheel + sdist, run the gate one more time
+# against the tagged commit (so a CI-green main can't drift before
+# release), then publish to PyPI via OIDC trusted publishing — no
+# API token in the repo.
+#
+# One-time setup on PyPI's side: at
+# https://pypi.org/manage/account/publishing/, configure a trusted
+# publisher for `harness-engineering` with:
+#   - owner: dr-gareth-roberts
+#   - repository: harness-engineering
+#   - workflow: release.yml
+#   - environment: pypi
+#
+# The `pypi` environment below matches; once configured, tag pushes
+# of the form vX.Y.Z trigger this workflow and publish.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    # Re-run the same gate CI runs, against the tagged commit. Don't
+    # ship a release that wouldn't have passed CI — even if the tagged
+    # commit is on `main`, a stale CI run is not the same as a fresh
+    # gate against the exact ref we're publishing.
+    name: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+          enable-cache: true
+      - run: uv python install 3.12
+      - name: Sync dependencies
+        run: |
+          uv sync \
+            --python 3.12 \
+            --extra dev \
+            --extra anthropic \
+            --extra openai-compat \
+            --extra otel \
+            --extra fuzz \
+            --extra docs
+      - run: uv run ruff check src tests examples
+      - run: uv run ruff format --check src tests examples
+      - run: uv run mypy --strict src tests
+      - run: uv run pytest -q
+      - run: uv run mkdocs build --strict
+
+  build-and-publish:
+    name: build + publish to PyPI
+    needs: gate
+    runs-on: ubuntu-latest
+    # The `pypi` environment is what PyPI's trusted publisher
+    # configuration matches against. It also gates the publish step
+    # behind any environment protection rules the repo defines
+    # (e.g., manual approval for production tags).
+    environment:
+      name: pypi
+      url: https://pypi.org/p/harness-engineering
+    permissions:
+      # Required for OIDC trusted publishing. `contents: read` from
+      # the workflow-level default carries through; this is the
+      # additional permission the publish action needs.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+      - run: uv build
+      - name: Publish to PyPI
+        # Pinning the action to a commit-equivalent tag (release/v1)
+        # rather than a SHA because the action is maintained by PyPA
+        # and the tag is what their docs guide to; SHAs are an option
+        # if a stricter supply-chain posture is needed.
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

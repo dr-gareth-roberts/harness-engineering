@@ -1,0 +1,57 @@
+name: Docs
+
+# Build the MkDocs site on every push to main, deploy via the modern
+# GitHub Pages action (no gh-pages branch needed; Pages source must be
+# set to "GitHub Actions" in repo settings).
+#
+# One-time setup: Settings → Pages → Source: GitHub Actions.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Avoid concurrent deployments stepping on each other if main pushes
+# arrive in rapid succession. `cancel-in-progress: false` because we'd
+# rather let an in-flight deployment finish than have the latest one
+# overtake it (Pages deploys are idempotent on content hash, so the
+# slower one finishing first is fine).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+          enable-cache: true
+      - run: uv python install 3.12
+      - name: Sync docs deps
+        run: uv sync --python 3.12 --extra docs
+      - name: Build site
+        run: uv run mkdocs build --strict
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
