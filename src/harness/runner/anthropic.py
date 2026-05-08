@@ -115,7 +115,29 @@ def _translate_block_in(block: ContentBlock) -> dict[str, Any] | None:
             "content": _serialize_tool_content(tr.content),
             "is_error": tr.is_error,
         }
+    elif block.type == "image" and block.image is not None:
+        # Anthropic vision shape (Wave 12 #7): {"type":"image",
+        # "source":{"type":"base64"|"url","media_type":...,"data":...}}.
+        # Both source modes use the same envelope; the SDK validates
+        # `media_type` against the supported list.
+        out = {
+            "type": "image",
+            "source": {
+                "type": block.image.source,
+                "media_type": block.image.media_type,
+                "data": block.image.data,
+            },
+        }
+    elif block.type == "file" and block.file_id is not None:
+        # Wave 12 #8 — Anthropic Files API integration. Reference the
+        # uploaded file by id; the API resolves the content server-side.
+        out = {
+            "type": "document",
+            "source": {"type": "file", "file_id": block.file_id},
+        }
     elif block.type == "file":
+        # Path-based fallback: inline the file's text contents as a
+        # text block, the historical pre-Wave-12 behavior.
         out = {
             "type": "text",
             "text": f"<file path={block.path}>\n{block.text or ''}\n</file>",

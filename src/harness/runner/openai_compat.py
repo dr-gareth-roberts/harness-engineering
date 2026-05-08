@@ -74,12 +74,15 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
 
     OpenAI uses a flat list with role-based dispatch:
     - system → {"role": "system", "content": str}
-    - user → {"role": "user", "content": str}
+    - user → {"role": "user", "content": str | list[part]}
     - assistant → {"role": "assistant", "content": str, "tool_calls": [...]?}
     - tool result → {"role": "tool", "tool_call_id": str, "content": str}
 
-    System messages and tool_use blocks live on different message types, so
-    we split a harness Message into multiple API entries when necessary.
+    User messages may have a *list* `content` containing text and image
+    parts when image blocks are present (Wave 12 #7); otherwise content
+    is a plain string. System messages and tool_use blocks live on
+    different message types, so we split a harness Message into
+    multiple API entries when necessary.
     """
     out: list[dict[str, Any]] = []
     for msg in messages:
@@ -90,6 +93,7 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
             continue
 
         text_parts: list[str] = []
+        image_parts: list[dict[str, Any]] = []
         tool_uses: list[ToolCall] = []
         tool_results: list[ToolResult] = []
         for block in msg.content:
@@ -99,6 +103,22 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
                 tool_uses.append(block.tool_use)
             elif block.type == "tool_result" and block.tool_result is not None:
                 tool_results.append(block.tool_result)
+            elif block.type == "image" and block.image is not None:
+                # OpenAI vision shape (Wave 12 #7): image_url parts
+                # carry either a data URL (`data:<media>;base64,<data>`)
+                # or a remote URL. The model decodes / fetches.
+                if block.image.source == "base64":
+                    url = f"data:{block.image.media_type};base64,{block.image.data}"
+                else:
+                    url = block.image.data
+                image_parts.append({"type": "image_url", "image_url": {"url": url}})
+            elif block.type == "file" and block.file_id is not None:
+                # OpenAI doesn't have a direct equivalent of Anthropic's
+                # Files API document blocks. Surface the file_id as a
+                # text placeholder so the model at least sees the
+                # reference; users on OpenAI should keep using
+                # path-based attach_file for inline content.
+                text_parts.append(f"<file file_id={block.file_id}>")
             elif block.type == "file":
                 text_parts.append(f"<file path={block.path}>\n{block.text or ''}\n</file>")
 
@@ -129,7 +149,17 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
                         "content": _serialize_tool_content(tr.content),
                     }
                 )
-            if text_parts:
+            if image_parts:
+                # Mixed text + image → list-shaped content. Wrap the
+                # text concat (if any) as a single text part so the
+                # ordering text-first / images-after stays predictable.
+                content_parts: list[dict[str, Any]] = []
+                joined_text = "".join(text_parts)
+                if joined_text:
+                    content_parts.append({"type": "text", "text": joined_text})
+                content_parts.extend(image_parts)
+                out.append({"role": "user", "content": content_parts})
+            elif text_parts:
                 out.append({"role": "user", "content": "".join(text_parts)})
 
     return out
