@@ -33,6 +33,17 @@ class Dispatcher:
     def tools_schema(self) -> list[dict[str, Any]]:
         return [tool.json_schema() for tool in self._tools.values()]
 
+    @property
+    def tools(self) -> dict[str, Tool]:
+        """Read-only snapshot of the registered tools, keyed by name.
+
+        Returns a fresh dict on each call so callers can't mutate the
+        registry. Use this when you need access to `Tool` metadata
+        (e.g. `idempotent` for `harness.speculate`); use `tools_schema`
+        for the JSON-schema export the runner sends to the model.
+        """
+        return dict(self._tools)
+
     async def dispatch(self, call: ToolCall) -> ToolResult:
         start = time.perf_counter()
         result = await self._dispatch_inner(call)
