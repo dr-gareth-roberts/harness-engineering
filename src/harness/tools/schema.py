@@ -15,6 +15,12 @@ class Tool(BaseModel):
     description: str
     input_model: type[BaseModel]
     handler: ToolHandler
+    idempotent: bool = False
+    """If True, this tool can be safely re-executed with the same arguments —
+    no side effects beyond what the first call produced. Reserved for the
+    speculative-execution feature (`harness.speculate`); ignored everywhere
+    else. Mark `True` only for read-only tools (`search`, `read_file`, etc.).
+    """
 
     def json_schema(self) -> dict[str, Any]:
         return {

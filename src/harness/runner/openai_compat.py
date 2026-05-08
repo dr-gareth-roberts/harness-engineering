@@ -35,6 +35,7 @@ from harness.agents.definition import SubAgent
 from harness.hooks.events import PostToolUse, PreToolUse
 from harness.hooks.runner import HookRunner
 from harness.prompts.messages import ContentBlock, Message, text
+from harness.runner.protocols import PrefixWatcherProtocol
 from harness.tools.dispatcher import Dispatcher
 from harness.tools.schema import ToolCall, ToolResult
 
@@ -183,6 +184,8 @@ class OpenAICompatRunner:
         api_key: str | None = None,
         max_tokens: int | None = 16_000,
         max_iterations: int = 10,
+        prefix_watcher: PrefixWatcherProtocol | None = None,
+        speculator: object | None = None,
     ) -> None:
         self.dispatcher = dispatcher
         self.hooks = hooks
@@ -200,6 +203,11 @@ class OpenAICompatRunner:
             self._client = AsyncOpenAI(**kwargs)
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
+        self._prefix_watcher = prefix_watcher
+        self._speculator = speculator
+        # `speculator` is reserved for the speculative-execution feature
+        # (`harness.speculate`); the runner accepts it now so adding the
+        # feature later doesn't require a constructor signature change.
 
     def _build_request(
         self,
@@ -229,6 +237,8 @@ class OpenAICompatRunner:
         request = self._build_request(agent, api_messages)
 
         for _ in range(self._max_iterations):
+            if self._prefix_watcher is not None:
+                await self._prefix_watcher.fingerprint(request)
             response = await self._client.chat.completions.create(**request)
             choice = response.choices[0]
             finish_reason = choice.finish_reason

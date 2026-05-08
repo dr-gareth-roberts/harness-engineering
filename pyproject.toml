@@ -23,6 +23,9 @@ openai-compat = ["openai>=1.40"]
 fuzz = ["hypothesis>=6"]
 attribute = ["sentence-transformers>=2"]
 
+[project.scripts]
+harness = "harness.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/harness"]
 

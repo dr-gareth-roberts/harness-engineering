@@ -7,6 +7,7 @@ is shared between both surfaces so verdicts are identical.
 
 from harness.contracts.check import check
 from harness.contracts.contract import Contract, ContractViolation, Violation
+from harness.contracts.dfa import DFA, compile_contract
 from harness.contracts.patterns import (
     Always,
     Earlier,
@@ -25,6 +26,7 @@ from harness.contracts.predicates import (
 from harness.contracts.runtime import attach_contracts
 
 __all__ = [
+    "DFA",
     "Always",
     "ArgMatches",
     "Contract",
@@ -41,4 +43,5 @@ __all__ = [
     "Violation",
     "attach_contracts",
     "check",
+    "compile_contract",
 ]
