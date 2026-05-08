@@ -1223,4 +1223,133 @@ Total Wave 2: ~2 220 src + ~3 190 test, **140 new tests**. Plus the pre-step (Wa
 *  feat: integrate Wave 2 — top-level re-exports + progress
 ```
 
+---
+
+## Post-Wave-2 integration fixes
+
+Three follow-ups flagged in the Wave 1 + Wave 2 reviews, applied as a single
+integration pass before Wave 3 begins. Each is a small, scoped fix on
+`chore/initial-scaffold`; total +~600 LoC across src + tests + docs.
+
+### Fix 1 (`dd3ed88`): `PostAssistantMessage` event + contracts runtime parity
+
+Closes the asymmetry that Wave 1 left documented as a follow-up: a contract
+like `Never(RoleIs("assistant") & TextMatches(r"i'?m sorry"))` only fired
+offline via `check(...)` because no hook event carried the assistant
+message. Now:
+
+- `harness.hooks.events.PostAssistantMessage(Event)` carries the assistant
+  `Message`. Docstring is explicit that it fires once per assistant message
+  the model produces — including intermediate text-plus-tool-use messages,
+  not only the terminal one.
+- `AnthropicRunner` and `OpenAICompatRunner` both emit it immediately after
+  `_translate_out(...)` builds the assistant `Message`, before the
+  stop-reason check, so terminal AND continuing iterations surface.
+- `attach_contracts` registers an observational handler. `forbid` and
+  `warn` matches surface as `ContractWarning` telemetry (the message has
+  already been produced — block is meaningless); `require` mid-stream still
+  raises (existing fail-fast extension).
+
+**Side effect worth noting for Wave 3:** the same observational helper now
+backs the existing `PostToolUse` handler. Before this commit, a `forbid`
+contract matching on a `PostToolUse` event was silently dropped — the
+handler called `_react_to_violation`, which returned a
+`HookDecision(block=True)`, but the handler's return type was `None` and
+the decision was discarded. After this commit, the same match emits a
+`ContractWarning` to the configured telemetry sink. Strictly an
+improvement; no behavior depends on the silent drop. Flagged here so a
+downstream user who built workflows around the silent-drop behavior knows
+where to look.
+
+Tests: 2 new contracts tests pin live assistant-text enforcement; 2 new
+runner tests pin per-iteration `PostAssistantMessage` emission via the
+existing `FakeAsyncAnthropic` fixture (terminal-only and full-loop cases).
+
+### Fix 2 (`888819e`): privacy boundary scope extension
+
+`PrivacyBoundary` v1 scanned `text` content blocks only. Wave 2's review
+flagged `tool_use.arguments` and `tool_result.content` as a documented
+limitation. Now:
+
+- `tool_use.arguments` walked recursively to find string leaves. Each
+  string value is scanned via the same `_scan_text` path that handles top-
+  level text — so `block` actions raise `PrivacyViolation` before the inner
+  runner is called, and `redact` actions replace the matched value in
+  place. Audit events surface paths like
+  `messages[i].content[j].tool_use.arguments.<key>`.
+- `tool_result.content` (`Any`-typed): when the value is a string, scanned
+  directly. When it's a dict / list, recursed.
+- Recursion capped at `_MAX_RECURSION_DEPTH = 4`. Beyond the cap, the
+  subtree is `json.dumps(default=str, sort_keys=True)`-ified and scanned
+  flat — detection still works, audit location carries the `[depth-cap]`
+  suffix so callers know recursion was truncated.
+- Location-path grammar documented in the boundary module docstring:
+  `<base>.<key>` for nested keys, `<base>[n]` for list indices,
+  `<base>[depth-cap]` for the flat-scan suffix.
+
+Tests: 6 new (string redaction in tool_use args, block before inner call,
+string redaction in tool_result content, nested dict redaction with dotted
+path, list-element redaction with `[n]` grammar, depth-cap fall-back).
+
+### Fix 3 (`6a32fe4`): README rewrite + format sweep
+
+The original README listed seven MVP modules and an "out-of-scope" Roadmap
+that was now entirely shipped. Rewrote the module table for the current
+18-module surface, grouping into:
+
+- **Core primitives** — the original tools / prompts / hooks / policy /
+  agents / runner / telemetry / memory / sandbox / replay set, with the
+  new `PostAssistantMessage` event listed and the runner row updated to
+  mention the `prefix_watcher` / `speculator` extension kwargs.
+- **Behavior & enforcement** — `harness.contracts`, `harness.privacy`,
+  `harness.plan`.
+- **Quality & exploration** — `harness.fuzz`, `harness.attribute`,
+  `harness.cache`, `harness.debug`.
+
+Plus a CLI section documenting the `register(subparsers)` discovery
+contract, and a Roadmap that reflects what's actually deferred today
+(speculative tool execution, OpenTelemetry export, plan inference from
+past sessions, ML-based privacy detection, DAP integration for the debug
+REPL).
+
+Format sweep: `uv run ruff format .` applied to ~13 pre-existing files
+that pre-dated Wave 1's clean-format agents. Pure whitespace / line-break
+changes; tests unchanged.
+
+### Additional runner emission test (`<this commit>`)
+
+Added in response to a post-fix review: Fix 1's runner emission of
+`PostAssistantMessage` was previously only verified via mypy structural
+typing — every test of the new event drove `attach_contracts` directly,
+none through a runner instance. Two new tests in
+`tests/runner/test_anthropic.py` close that gap using the existing
+`FakeAsyncAnthropic` infrastructure. The OpenAI-compat runner's emission
+mirrors the Anthropic runner's loop position; documented as a Wave 3
+TODO if a regression-defending mirror is wanted.
+
+### Verification (post-fixes)
+
+- `uv run pytest -q` — **379 passed, 1 skipped** in 1.5 s (was 377; +2
+  runner emission tests).
+- `uv run mypy` — clean strict (73 source files).
+- `uv run ruff check` + `ruff format --check` — both clean.
+- `uv run python examples/end_to_end.py` — runs to completion.
+- `uv run harness --help` — `cache-audit` + `debug` subcommands wired.
+
+### Wave 3 prologue
+
+Wave 3 is gated on a runner streaming refactor for `harness.speculate`
+(#5). When that lands:
+
+- Add `SpeculatorProtocol` to `src/harness/runner/protocols.py` (mirror of
+  `PrefixWatcherProtocol`).
+- Widen the `speculator` kwarg on both runners from `object | None` to
+  `SpeculatorProtocol | None` — typing-only widening, doesn't break
+  callers.
+- Refactor the runner's tool-use loop to pass through stream events
+  rather than `get_final_message()`-only.
+
+`Tool.idempotent: bool = False` is already in the schema (added in the
+Wave 2 pre-step); the speculator only fires on idempotent tools.
+
 

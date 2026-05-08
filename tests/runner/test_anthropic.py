@@ -252,3 +252,79 @@ def test_missing_anthropic_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -
 
     with pytest.raises(ImportError, match=r"harness-engineering\[anthropic\]"):
         importlib.import_module("harness.runner.anthropic")
+
+
+# ---------------------------------------------------------------------------
+# PostAssistantMessage event emission (closes the contracts runtime parity gap)
+
+
+async def test_runner_emits_post_assistant_message_on_terminal_iteration() -> None:
+    """Pins that AnthropicRunner emits PostAssistantMessage when the model
+    returns a final assistant turn. Closes the gap that no test in
+    `tests/contracts` exercises — they all drive `attach_contracts` directly,
+    not through a runner instance.
+    """
+    from harness.hooks import PostAssistantMessage
+
+    response = FakeMessage(
+        content=[FakeTextBlock(text="hello there")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+    hooks = HookRunner()
+    seen: list[Message] = []
+
+    def capture(event: PostAssistantMessage) -> None:
+        seen.append(event.message)
+
+    hooks.register(PostAssistantMessage, capture)
+
+    runner = AnthropicRunner(dispatcher, hooks, client=client)  # type: ignore[arg-type]
+    result = await runner(_agent(), [text("user", "hi")])
+
+    # One terminal assistant message → one event.
+    assert len(seen) == 1
+    assert seen[0] is result
+    assert seen[0].content[0].text == "hello there"
+
+
+async def test_runner_emits_post_assistant_message_on_each_loop_iteration() -> None:
+    """Per-iteration emission: a tool-use loop with N iterations produces N
+    PostAssistantMessage events — including intermediate text-plus-tool-use
+    messages that never return to the orchestrator. Without per-iteration
+    emission, contracts over assistant text would miss intermediate turns.
+    """
+    from harness.hooks import PostAssistantMessage
+
+    tool_use = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "hi"})
+    response_1 = FakeMessage(
+        content=[FakeTextBlock(text="I'll echo that"), tool_use],
+        stop_reason="tool_use",
+    )
+    response_2 = FakeMessage(
+        content=[FakeTextBlock(text="echoed: hi")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, _ = _echo_dispatcher()
+    hooks = HookRunner()
+    seen: list[Message] = []
+
+    def capture(event: PostAssistantMessage) -> None:
+        seen.append(event.message)
+
+    hooks.register(PostAssistantMessage, capture)
+
+    runner = AnthropicRunner(dispatcher, hooks, client=client)  # type: ignore[arg-type]
+    await runner(_agent(), [text("user", "echo hi")])
+
+    # Two iterations → two events: the intermediate text-plus-tool-use
+    # message and the terminal text-only message.
+    assert len(seen) == 2
+    iter1_text = "".join(b.text or "" for b in seen[0].content if b.type == "text")
+    iter2_text = "".join(b.text or "" for b in seen[1].content if b.type == "text")
+    assert iter1_text == "I'll echo that"
+    assert iter2_text == "echoed: hi"
+    # Intermediate message also carried the tool_use block.
+    assert any(b.type == "tool_use" for b in seen[0].content)
