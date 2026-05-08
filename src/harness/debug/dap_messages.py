@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class _DapBase(BaseModel):
@@ -52,7 +52,9 @@ class Request(_DapBase):
 class Response(_DapBase):
     seq: int
     type: Literal["response"] = "response"
-    request_seq: int = Field(alias="request_seq", serialization_alias="request_seq")
+    # request_seq is one of the few snake_case fields in the DAP spec —
+    # keep both validation and serialization in snake_case.
+    request_seq: int
     success: bool
     command: str
     message: str | None = None
@@ -83,17 +85,26 @@ class Capabilities(_DapBase):
 
     supports_configuration_done_request: bool = Field(
         default=True,
-        alias="supportsConfigurationDoneRequest",
+        validation_alias=AliasChoices(
+            "supports_configuration_done_request",
+            "supportsConfigurationDoneRequest",
+        ),
         serialization_alias="supportsConfigurationDoneRequest",
     )
     supports_evaluate_for_hovers: bool = Field(
         default=True,
-        alias="supportsEvaluateForHovers",
+        validation_alias=AliasChoices(
+            "supports_evaluate_for_hovers",
+            "supportsEvaluateForHovers",
+        ),
         serialization_alias="supportsEvaluateForHovers",
     )
     supports_terminate_request: bool = Field(
         default=True,
-        alias="supportsTerminateRequest",
+        validation_alias=AliasChoices(
+            "supports_terminate_request",
+            "supportsTerminateRequest",
+        ),
         serialization_alias="supportsTerminateRequest",
     )
     # We accept setBreakpoints requests but only honor them as turn-index
@@ -101,7 +112,10 @@ class Capabilities(_DapBase):
     # breakpoints are how editors communicate "stop at trajectory point N".
     supports_breakpoint_locations_request: bool = Field(
         default=False,
-        alias="supportsBreakpointLocationsRequest",
+        validation_alias=AliasChoices(
+            "supports_breakpoint_locations_request",
+            "supportsBreakpointLocationsRequest",
+        ),
         serialization_alias="supportsBreakpointLocationsRequest",
     )
 
@@ -119,12 +133,12 @@ class Source(_DapBase):
     path: str | None = None
     source_reference: int | None = Field(
         default=None,
-        alias="sourceReference",
+        validation_alias=AliasChoices("source_reference", "sourceReference"),
         serialization_alias="sourceReference",
     )
     presentation_hint: str | None = Field(
         default=None,
-        alias="presentationHint",
+        validation_alias=AliasChoices("presentation_hint", "presentationHint"),
         serialization_alias="presentationHint",
     )
 
@@ -140,13 +154,13 @@ class StackFrame(_DapBase):
 class Scope(_DapBase):
     name: str
     variables_reference: int = Field(
-        alias="variablesReference",
+        validation_alias=AliasChoices("variables_reference", "variablesReference"),
         serialization_alias="variablesReference",
     )
     expensive: bool = False
     presentation_hint: str | None = Field(
         default=None,
-        alias="presentationHint",
+        validation_alias=AliasChoices("presentation_hint", "presentationHint"),
         serialization_alias="presentationHint",
     )
 
@@ -157,7 +171,7 @@ class Variable(_DapBase):
     type: str | None = None
     variables_reference: int = Field(
         default=0,
-        alias="variablesReference",
+        validation_alias=AliasChoices("variables_reference", "variablesReference"),
         serialization_alias="variablesReference",
     )
     # DAP also defines `presentationHint`, `evaluateName`, `memoryReference`
