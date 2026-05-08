@@ -257,3 +257,58 @@ async def test_none_valued_payload_fields_are_skipped_not_emitted(
     # Non-None scalar payload fields are still promoted.
     assert attrs["harness.agent_name"] == "demo"
     assert attrs["harness.duration_ms"] == 42.0
+
+
+# ---------------------------------------------------------------------------
+# Wave 11 #10 / #11: correlation IDs ride as attributes on the OTel event
+
+
+async def test_correlation_ids_ride_as_attributes_on_otel_event(
+    otel_pipeline: tuple[otel_trace.Tracer, InMemorySpanExporter],
+) -> None:
+    """An event emitted inside Telemetry.session_scope + span_scope carries
+    trace_id / span_id / parent_span_id; OpenTelemetrySink promotes those
+    as `harness.trace_id` / `harness.span_id` / `harness.parent_span_id`
+    attributes on the OTel event so users can group / filter on them in
+    their backend (Jaeger, Tempo, Honeycomb)."""
+    from harness.telemetry import Telemetry
+
+    tracer, exporter = otel_pipeline
+    sink = OpenTelemetrySink(tracer=tracer)
+    telemetry = Telemetry(sink)
+
+    with tracer.start_as_current_span("test-root"):
+        async with telemetry.session_scope() as trace_id:
+            async with telemetry.span_scope() as span_id:
+                await telemetry.emit(make_tool_event())
+
+    [otel_span] = exporter.get_finished_spans()
+    [otel_event] = otel_span.events
+    attrs: dict[str, Any] = dict(otel_event.attributes or {})
+
+    assert attrs["harness.trace_id"] == trace_id
+    assert attrs["harness.span_id"] == span_id
+    # Top-level span has no parent.
+    assert "harness.parent_span_id" not in attrs
+
+
+async def test_nested_span_scope_records_parent_span_id_attribute(
+    otel_pipeline: tuple[otel_trace.Tracer, InMemorySpanExporter],
+) -> None:
+    from harness.telemetry import Telemetry
+
+    tracer, exporter = otel_pipeline
+    sink = OpenTelemetrySink(tracer=tracer)
+    telemetry = Telemetry(sink)
+
+    with tracer.start_as_current_span("test-root"):
+        async with telemetry.session_scope():
+            async with telemetry.span_scope() as outer_span:
+                async with telemetry.span_scope() as _inner_span:
+                    await telemetry.emit(make_tool_event())
+
+    [otel_span] = exporter.get_finished_spans()
+    [otel_event] = otel_span.events
+    attrs: dict[str, Any] = dict(otel_event.attributes or {})
+
+    assert attrs["harness.parent_span_id"] == outer_span
