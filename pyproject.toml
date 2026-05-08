@@ -20,6 +20,8 @@ dev = [
 ]
 anthropic = ["anthropic>=0.60"]
 openai-compat = ["openai>=1.40"]
+fuzz = ["hypothesis>=6"]
+attribute = ["sentence-transformers>=2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/harness"]
