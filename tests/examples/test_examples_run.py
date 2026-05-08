@@ -33,6 +33,8 @@ EXAMPLES: list[tuple[str, str]] = [
     ("privacy", "REDACTED"),
     ("otel", "events on span"),
     ("debug", "breakpoint"),
+    ("fuzz", "failures"),
+    ("attribute", "top"),
 ]
 
 
