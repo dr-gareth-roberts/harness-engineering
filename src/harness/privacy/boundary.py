@@ -15,9 +15,33 @@ caller -> messages -+--> [outbound scan] --> inner runner -> message
 
 Scope
 -----
-v1 scans `type == "text"` content blocks only. `tool_use.arguments` and
-`tool_result.content` are not scanned in this pass; documented as future
-work. The doc comment on `_scan_messages` calls this out.
+The boundary scans three content shapes: `text` blocks, `tool_use.arguments`
+(walked recursively to find string leaves), and `tool_result.content` (also
+walked recursively when its value is a dict / list — string-typed content
+is scanned directly).
+
+Recursion into structured tool_use / tool_result values is capped at
+`_MAX_RECURSION_DEPTH` levels deep. Nodes deeper than the cap are
+stringified via `json.dumps(default=str, sort_keys=True)` and scanned as a
+single flat blob — detection still works, but the audit event's location
+is annotated `[depth-cap]` rather than carrying a nested path.
+
+Location-path grammar
+---------------------
+Audit events carry a `location` string identifying where the match was
+found. Format:
+
+    messages[i].content[j].text                                  — text block
+    messages[i].content[j].tool_use.arguments.<key>              — tool_use
+    messages[i].content[j].tool_use.arguments.<key>.<sub>        — nested
+    messages[i].content[j].tool_use.arguments.<key>[n]           — list item
+    messages[i].content[j].tool_result.content                   — string-typed
+    messages[i].content[j].tool_result.content.<key>             — nested
+    messages[i].content[j].tool_result.content[depth-cap]        — capped
+
+Top-level tool-call args dicts use plain `.<key>`; nested keys chain with
+`.`; list elements use `[n]`. The cap suffix appears only when recursion
+exceeded `_MAX_RECURSION_DEPTH`.
 
 Per-detector overrides
 ----------------------
@@ -30,8 +54,9 @@ may rely on it.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from harness.privacy.detectors import (
     Action,
@@ -41,6 +66,15 @@ from harness.privacy.detectors import (
 )
 from harness.privacy.events import DetectionEvent
 from harness.prompts.messages import ContentBlock, Message
+from harness.tools.schema import ToolCall, ToolResult
+
+_MAX_RECURSION_DEPTH = 4
+"""Max nesting depth when walking tool_use.arguments and tool_result.content.
+
+Beyond this, the value is stringified once and scanned as a flat blob.
+Bounded recursion avoids hangs on self-referential or pathologically deep
+data while still catching leaks at realistic nesting depths.
+"""
 
 if TYPE_CHECKING:
     from harness.agents.definition import SubAgent
@@ -127,21 +161,124 @@ class PrivacyBoundary:
         for m_idx, msg in enumerate(messages):
             new_blocks: list[ContentBlock] = []
             for b_idx, block in enumerate(msg.content):
-                # Scope decision: v1 only scans `text` blocks. tool_use args
-                # and tool_result content can also leak; documented as
-                # future work in the module docstring.
-                if block.type != "text" or not block.text:
-                    new_blocks.append(block)
+                base = f"messages[{m_idx}].content[{b_idx}]"
+
+                if block.type == "text" and block.text:
+                    redacted_text = await self._scan_text(
+                        block.text,
+                        direction=direction,
+                        location=f"{base}.text",
+                    )
+                    new_blocks.append(block.model_copy(update={"text": redacted_text}))
                     continue
-                location = f"messages[{m_idx}].content[{b_idx}].text"
-                redacted_text = await self._scan_text(
-                    block.text,
-                    direction=direction,
-                    location=location,
-                )
-                new_blocks.append(block.model_copy(update={"text": redacted_text}))
+
+                if block.type == "tool_use" and block.tool_use is not None:
+                    new_args = await self._scan_value(
+                        block.tool_use.arguments,
+                        direction=direction,
+                        location=f"{base}.tool_use.arguments",
+                        depth=0,
+                    )
+                    new_call = ToolCall(
+                        name=block.tool_use.name,
+                        arguments=new_args if isinstance(new_args, dict) else {},
+                        id=block.tool_use.id,
+                    )
+                    new_blocks.append(block.model_copy(update={"tool_use": new_call}))
+                    continue
+
+                if block.type == "tool_result" and block.tool_result is not None:
+                    new_content = await self._scan_value(
+                        block.tool_result.content,
+                        direction=direction,
+                        location=f"{base}.tool_result.content",
+                        depth=0,
+                    )
+                    new_result = ToolResult(
+                        id=block.tool_result.id,
+                        content=new_content,
+                        is_error=block.tool_result.is_error,
+                    )
+                    new_blocks.append(block.model_copy(update={"tool_result": new_result}))
+                    continue
+
+                # File blocks and other types: pass through.
+                new_blocks.append(block)
             out.append(Message(role=msg.role, content=new_blocks))
         return out
+
+    async def _scan_value(
+        self,
+        value: Any,
+        *,
+        direction: Direction,
+        location: str,
+        depth: int,
+    ) -> Any:
+        """Walk a structured value, scanning string leaves.
+
+        `block` actions raise `PrivacyViolation` exactly as they do for
+        top-level text — `_scan_text` is the single source of action
+        semantics. Non-string scalars (int / bool / None / float) pass
+        through unchanged. Dicts and lists are walked; their keys / indices
+        chain into the location string. Beyond `_MAX_RECURSION_DEPTH`,
+        the subtree is stringified once and scanned flat.
+        """
+        if value is None or isinstance(value, bool | int | float):
+            return value
+
+        if isinstance(value, str):
+            return await self._scan_text(value, direction=direction, location=location)
+
+        if depth >= _MAX_RECURSION_DEPTH:
+            # Cap reached: flat-scan the JSON serialization. The redacted
+            # string replaces the original subtree wholesale — the audit
+            # event makes the depth-cap explicit so callers can see when
+            # recursion was truncated.
+            flat = json.dumps(value, default=str, sort_keys=True)
+            return await self._scan_text(
+                flat,
+                direction=direction,
+                location=f"{location}[depth-cap]",
+            )
+
+        if isinstance(value, dict):
+            new_dict: dict[str, Any] = {}
+            for k, v in value.items():
+                sub_location = f"{location}.{k}"
+                new_dict[k] = await self._scan_value(
+                    v,
+                    direction=direction,
+                    location=sub_location,
+                    depth=depth + 1,
+                )
+            return new_dict
+
+        if isinstance(value, list):
+            new_list: list[Any] = []
+            for i, v in enumerate(value):
+                sub_location = f"{location}[{i}]"
+                new_list.append(
+                    await self._scan_value(
+                        v,
+                        direction=direction,
+                        location=sub_location,
+                        depth=depth + 1,
+                    )
+                )
+            return new_list
+
+        # Unknown type (custom class etc.): scan the str() representation
+        # as a defense-in-depth measure. Redaction here can't preserve the
+        # type, so we return the original on miss and the redacted str on
+        # hit. Document as a corner case.
+        as_str = str(value)
+        scanned = await self._scan_text(
+            as_str,
+            direction=direction,
+            location=f"{location}[str]",
+        )
+        return scanned if scanned != as_str else value
 
     async def _scan_text(
         self,

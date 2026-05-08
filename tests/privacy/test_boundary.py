@@ -386,3 +386,227 @@ async def test_jsonl_sink_emit_works_as_audit_sink(tmp_path: Path) -> None:
     # No value field — privacy guarantee survives the JSONL serialization.
     assert "value" not in record
     assert "123-45-6789" not in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# Extended scope: tool_use.arguments and tool_result.content
+# (Wave 2 follow-up — boundary v1 scanned text blocks only.)
+
+
+def _tool_use_msg(name: str, arguments: dict[str, object]) -> Message:
+    """Build an assistant message containing a single tool_use block."""
+    from harness.prompts.messages import ContentBlock
+    from harness.tools.schema import ToolCall
+
+    return Message(
+        role="assistant",
+        content=[
+            ContentBlock(
+                type="tool_use",
+                tool_use=ToolCall(name=name, arguments=arguments, id="tu-1"),
+            )
+        ],
+    )
+
+
+def _tool_result_msg(content: object) -> Message:
+    """Build a user message containing a single tool_result block."""
+    from harness.prompts.messages import ContentBlock
+    from harness.tools.schema import ToolResult
+
+    return Message(
+        role="user",
+        content=[
+            ContentBlock(
+                type="tool_result",
+                tool_result=ToolResult(id="tu-1", content=content),
+            )
+        ],
+    )
+
+
+async def test_tool_use_arguments_string_value_is_redacted() -> None:
+    captured, sink = make_event_capture()
+    boundary = PrivacyBoundary(
+        detectors=[RegexDetector("us_ssn", r"\b\d{3}-\d{2}-\d{4}\b", action="redact")],
+        audit_sink=sink,
+    )
+    inner = RecordingRunner()
+    wrapped = boundary.wrap(inner)
+
+    msg = _tool_use_msg("save_user", {"name": "Alex", "ssn": "123-45-6789"})
+    await wrapped(make_agent(), [msg])
+
+    # The inner runner saw a redacted argument value, never the raw SSN.
+    seen = inner.calls[0][0].content[0].tool_use
+    assert seen is not None
+    assert seen.arguments["ssn"] == "[REDACTED:us_ssn]"
+    assert seen.arguments["name"] == "Alex"
+
+    # Audit event carries the nested location path.
+    assert len(captured) == 1
+    assert captured[0].location == "messages[0].content[0].tool_use.arguments.ssn"
+    assert captured[0].direction == "outbound"
+
+
+async def test_tool_use_arguments_block_action_raises_before_inner_call() -> None:
+    boundary = PrivacyBoundary(
+        detectors=[
+            RegexDetector("aws_key", r"\bAKIA[A-Z0-9]{16}\b", action="block"),
+        ],
+    )
+    inner = RecordingRunner()
+    wrapped = boundary.wrap(inner)
+
+    msg = _tool_use_msg("upload", {"key": "AKIAABCDEFGHIJKLMNOP", "bucket": "x"})
+
+    with pytest.raises(PrivacyViolation) as exc_info:
+        await wrapped(make_agent(), [msg])
+
+    assert exc_info.value.detection.name == "aws_key"
+    assert "tool_use.arguments.key" in exc_info.value.detection.location
+    assert inner.calls == []
+
+
+async def test_tool_result_string_content_is_redacted_inbound() -> None:
+    """A tool result returning a SSN string is redacted before the caller sees it."""
+    captured, sink = make_event_capture()
+    boundary = PrivacyBoundary(
+        detectors=[
+            RegexDetector(
+                "us_ssn",
+                r"\b\d{3}-\d{2}-\d{4}\b",
+                direction="inbound",
+                action="redact",
+            ),
+        ],
+        audit_sink=sink,
+    )
+
+    class ToolResultRunner:
+        async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
+            return _tool_result_msg("Found user: SSN 123-45-6789")
+
+    wrapped = boundary.wrap(ToolResultRunner())
+    reply = await wrapped(make_agent(), [text("user", "lookup")])
+
+    block = reply.content[0]
+    assert block.tool_result is not None
+    content = block.tool_result.content
+    assert "[REDACTED:us_ssn]" in content
+    assert "123-45-6789" not in content
+    assert any(
+        e.location == "messages[0].content[0].tool_result.content" for e in captured
+    )
+
+
+async def test_tool_result_nested_dict_redaction_uses_dotted_path() -> None:
+    """A SSN nested inside a dict-shaped tool result is redacted; the audit
+    event's location reflects the path that was walked."""
+    captured, sink = make_event_capture()
+    boundary = PrivacyBoundary(
+        detectors=[
+            RegexDetector(
+                "us_ssn",
+                r"\b\d{3}-\d{2}-\d{4}\b",
+                direction="inbound",
+                action="redact",
+            ),
+        ],
+        audit_sink=sink,
+    )
+
+    class NestedDictRunner:
+        async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
+            payload = {
+                "user": {"name": "Alex", "identifiers": {"ssn": "123-45-6789"}},
+                "ok": True,
+            }
+            return _tool_result_msg(payload)
+
+    wrapped = boundary.wrap(NestedDictRunner())
+    reply = await wrapped(make_agent(), [text("user", "lookup")])
+
+    new = reply.content[0].tool_result
+    assert new is not None
+    assert new.content["user"]["identifiers"]["ssn"] == "[REDACTED:us_ssn]"
+    assert new.content["user"]["name"] == "Alex"
+    assert new.content["ok"] is True
+
+    locations = [e.location for e in captured]
+    assert (
+        "messages[0].content[0].tool_result.content.user.identifiers.ssn" in locations
+    )
+
+
+async def test_tool_result_list_element_is_redacted_with_index_grammar() -> None:
+    """A SSN buried in a list inside the tool result is redacted; the audit
+    event's location uses `[n]` for list indices."""
+    captured, sink = make_event_capture()
+    boundary = PrivacyBoundary(
+        detectors=[
+            RegexDetector(
+                "us_ssn",
+                r"\b\d{3}-\d{2}-\d{4}\b",
+                direction="inbound",
+                action="redact",
+            ),
+        ],
+        audit_sink=sink,
+    )
+
+    class ListRunner:
+        async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
+            return _tool_result_msg(
+                {"hits": ["clean", "ssn=123-45-6789", "also clean"]}
+            )
+
+    wrapped = boundary.wrap(ListRunner())
+    reply = await wrapped(make_agent(), [text("user", "lookup")])
+    content = reply.content[0].tool_result.content  # type: ignore[union-attr]
+    assert content["hits"][1] == "ssn=[REDACTED:us_ssn]"
+    assert content["hits"][0] == "clean"
+
+    assert any(
+        e.location == "messages[0].content[0].tool_result.content.hits[1]"
+        for e in captured
+    )
+
+
+async def test_recursion_depth_cap_still_catches_deep_leaks() -> None:
+    """Beyond `_MAX_RECURSION_DEPTH`, the subtree is stringified and scanned
+    flat. Detection must still work even when nesting is pathological."""
+    captured, sink = make_event_capture()
+    boundary = PrivacyBoundary(
+        detectors=[
+            RegexDetector(
+                "us_ssn",
+                r"\b\d{3}-\d{2}-\d{4}\b",
+                direction="inbound",
+                action="redact",
+            ),
+        ],
+        audit_sink=sink,
+    )
+
+    # 10 levels deep — beyond the cap of 4.
+    deep: dict[str, object] = {"ssn": "123-45-6789"}
+    for _ in range(10):
+        deep = {"nested": deep}
+
+    class DeepRunner:
+        async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
+            return _tool_result_msg(deep)
+
+    wrapped = boundary.wrap(DeepRunner())
+    reply = await wrapped(make_agent(), [text("user", "lookup")])
+
+    # The deep subtree was flat-scanned and the redacted serialization
+    # replaced the inner subtree wholesale — at least one audit location
+    # carries the [depth-cap] suffix.
+    assert any("[depth-cap]" in e.location for e in captured)
+
+    # The redaction marker reached the resulting payload via the flat-scan.
+    payload_str = json.dumps(reply.content[0].tool_result.content)  # type: ignore[union-attr]
+    assert "[REDACTED:us_ssn]" in payload_str
+    assert "123-45-6789" not in payload_str
