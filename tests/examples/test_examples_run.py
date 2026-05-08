@@ -35,6 +35,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("debug", "breakpoint"),
     ("fuzz", "failures"),
     ("attribute", "top"),
+    ("counterfactual", "counterfactual"),
+    ("diff_eval", "unanimous"),
+    ("plan", "plan"),
 ]
 
 
