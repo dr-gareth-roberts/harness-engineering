@@ -38,6 +38,16 @@ class Orchestrator:
         self._runner = runner
         self._telemetry = telemetry
 
+    @property
+    def telemetry(self) -> Telemetry | None:
+        """Public, read-only view of the configured telemetry sink (may be `None`).
+
+        Lets wrappers like `harness.replay.counterfactual` re-instantiate an
+        orchestrator with the same telemetry without poking at the private
+        attribute.
+        """
+        return self._telemetry
+
     async def run(self, agent: SubAgent, messages: list[Message]) -> Message:
         start = time.perf_counter()
         err: str | None = None

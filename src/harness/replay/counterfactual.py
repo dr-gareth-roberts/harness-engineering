@@ -166,7 +166,7 @@ async def counterfactual(
     advances naturally when the new record is constructed.
 
     The passed `orchestrator` is treated as a configuration bag: its
-    `dispatcher`, `hooks`, and `_telemetry` are reused, but the live runner
+    `dispatcher`, `hooks`, and `telemetry` are reused, but the live runner
     you supply here is the one that produces the continuation — the
     orchestrator's own runner is ignored.
     """
@@ -177,7 +177,7 @@ async def counterfactual(
         dispatcher=orchestrator.dispatcher,
         hooks=orchestrator.hooks,
         runner=runner,
-        telemetry=orchestrator._telemetry,
+        telemetry=orchestrator.telemetry,
     )
     continuation = await drive.run(working.agent, prefix)
 
