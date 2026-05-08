@@ -21,6 +21,16 @@ class TelemetryEvent(BaseModel):
     event_id: UUID = Field(default_factory=uuid4)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     kind: str
+    # Correlation IDs (Wave 11 #11). Threaded through by the
+    # `Telemetry` recorder via `contextvars` — `session_scope()` issues
+    # a fresh `trace_id`; `span_scope()` issues a fresh `span_id` and
+    # records the current span as `parent_span_id`. All three are
+    # optional so existing callers (and code paths that don't go
+    # through the recorder) still work — `OpenTelemetrySink` falls
+    # back to flat events when they're absent.
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
 
 
 class ToolDispatched(TelemetryEvent):

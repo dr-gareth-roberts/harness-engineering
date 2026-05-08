@@ -45,11 +45,20 @@ class Dispatcher:
         return dict(self._tools)
 
     async def dispatch(self, call: ToolCall) -> ToolResult:
-        start = time.perf_counter()
-        result = await self._dispatch_inner(call)
-        duration_ms = (time.perf_counter() - start) * 1000.0
+        # Open a span_scope for the dispatch so the emitted
+        # `ToolDispatched` event correlates back to the orchestrator
+        # turn that produced this call. The scope is conditional on
+        # telemetry being configured — without it, no `span_id` would
+        # ever propagate, so the scope is wasted work.
+        if self._telemetry is None:
+            start = time.perf_counter()
+            return await self._dispatch_inner(call)
 
-        if self._telemetry is not None:
+        async with self._telemetry.span_scope():
+            start = time.perf_counter()
+            result = await self._dispatch_inner(call)
+            duration_ms = (time.perf_counter() - start) * 1000.0
+
             from harness.telemetry.events import ToolDispatched, jsonify
 
             await self._telemetry.emit(
@@ -61,7 +70,7 @@ class Dispatcher:
                     duration_ms=duration_ms,
                 )
             )
-        return result
+            return result
 
     async def _dispatch_inner(self, call: ToolCall) -> ToolResult:
         tool = self._tools.get(call.name)
