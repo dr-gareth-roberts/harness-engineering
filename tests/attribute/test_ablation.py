@@ -12,6 +12,7 @@ from harness.attribute import (
     AttributionResult,
     InMemoryAttributionCache,
     JaccardSimilarity,
+    LengthRatio,
     attribute,
     chunk_session,
 )
@@ -160,52 +161,54 @@ async def test_estimate_only_reports_cost_without_calling_runner() -> None:
 async def test_top_k_surfaces_the_synthetic_cause_first() -> None:
     """Spec test 7: when one chunk obviously caused the target, top_k(1) returns it.
 
-    The synthetic setup: a runner that echoes a fixed string for every input.
-    Each ablated re-run will produce identical text, so the only signal in
-    the score is whether the *original target* matched the runner's echo.
-    To make chunk-2 the obvious cause, we set the original target to the
-    text of chunk-2 and have the runner return something different — when
-    chunk-2 is removed the response is "different from the target", so its
-    influence score is the highest. Removing other chunks doesn't change the
-    response either, but those chunks aren't matched to the target text.
+    Setup: an "echo-with-weight" runner returns the concatenation of all
+    text it sees, but the second user message is *much longer* than the
+    others. When that long chunk is ablated the response shrinks
+    dramatically, so the `LengthRatio` similarity to the original target
+    drops sharply. Ablating any other (short) chunk barely moves the
+    length, so its influence score stays low.
 
-    A cleaner setup: have the runner read which chunk is missing. The
-    synthetic runner below returns the *concatenated* prefix text it sees;
-    when chunk-2 is missing the response loses chunk-2's tokens, so the
-    similarity to the original (concatenated) target drops — chunk-2 is the
-    most influential.
+    This deliberately uses a different mechanism from test 10:
+    - Test 10 uses a conditional `if target_text in prefix` runner with
+      Jaccard similarity (token-overlap signal).
+    - Test 7 uses an echoing runner with `LengthRatio` similarity (length
+      signal). Same conclusion (causal chunk ranks #1) reached by a
+      different code path.
     """
-    chunks = ["alpha", "beta", "gamma", "delta", "epsilon"]
-    user_messages = [text("user", c) for c in chunks]
-    target_text = " ".join(chunks)
+    short = "x"
+    long_chunk = "this is a much longer chunk with many more characters than its peers"
+    chunk_texts = [short, long_chunk, short, short, short]  # causal at index 1
+    causal_index = 1
 
-    async def concat_runner(_agent: SubAgent, messages: list[Message]) -> Message:
-        seen: list[str] = []
-        for m in messages:
-            for b in m.content:
-                if b.type == "text" and b.text:
-                    seen.append(b.text)
-        return text("assistant", " ".join(seen))
+    async def echo_runner(_agent: SubAgent, messages: list[Message]) -> Message:
+        echoed = " ".join(
+            block.text or ""
+            for m in messages
+            for block in m.content
+            if block.type == "text" and block.text
+        )
+        return text("assistant", echoed)
 
-    record = _record([*user_messages, text("assistant", target_text)])
+    target_text = " ".join(chunk_texts)
+    record = _record([*(text("user", c) for c in chunk_texts), text("assistant", target_text)])
 
     result = await attribute(
         record,
         target_message_index=-1,
-        runner=concat_runner,
+        runner=echo_runner,
         agent=_agent(),
         granularity="message",
-        similarity=JaccardSimilarity(),
+        similarity=LengthRatio(),
     )
 
-    # All chunks contribute equally to the concatenated target, so all scores
-    # should be similar — but the test still has to *rank* and produce a
-    # deterministic top result. The point of this case is structural: top_k
-    # works, returns the right shape, and respects the descending sort.
     top = result.top_k(1)
     assert len(top) == 1
-    assert isinstance(top[0].score, float)
-    assert top[0].score == max(c.score for c in result.chunks)
+    assert top[0].message_index == causal_index, (
+        "ablating the long chunk should produce the largest length-ratio "
+        "divergence and rank #1 in top_k"
+    )
+    other_scores = [c.score for c in result.chunks if c.message_index != causal_index]
+    assert top[0].score > max(other_scores)
 
 
 async def test_top_k_returns_at_most_k_chunks() -> None:
