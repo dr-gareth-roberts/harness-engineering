@@ -254,9 +254,7 @@ async def test_miss_returns_none_and_keeps_other_pending_speculations() -> None:
     assert miss_result is None
 
     # The other speculation is still pending — model could still hit it.
-    hit_result = await speculator.try_resolve(
-        ToolCall(name="parse", arguments={"q": "x"}, id="m2")
-    )
+    hit_result = await speculator.try_resolve(ToolCall(name="parse", arguments={"q": "x"}, id="m2"))
     assert hit_result is not None
     assert hit_result.content == "parse-result-x"
 
@@ -492,9 +490,7 @@ async def test_hook_exception_during_speculation_does_not_crash_runner() -> None
 
     # The speculation task ended in an exception. try_resolve must NOT
     # propagate it — it should return a ToolResult(is_error=True).
-    result = await speculator.try_resolve(
-        ToolCall(name="search", arguments={"q": "x"}, id="m")
-    )
+    result = await speculator.try_resolve(ToolCall(name="search", arguments={"q": "x"}, id="m"))
     await speculator.end()
 
     assert result is not None

@@ -99,10 +99,15 @@ class SequencePredictor:
 
     Builds a table `(prev_tool_name → Counter(next_tool_name))` from the
     history, then for the most-recent call's name picks the top
-    `max_predictions` successors. The predicted `ToolCall.arguments` are
-    inherited from the most recent call to that successor tool — when
-    the model called `search` after `parse` last time with `q="foo"`,
-    we'll guess `search(q="foo")` again.
+    `max_predictions` successors. Predicted `ToolCall.arguments` are
+    inherited from the successor instance that *followed* the most
+    recent occurrence of the predecessor — i.e. the most recent
+    `(predecessor, successor)` pair specifically, not the most recent
+    instance of the successor tool overall. So if the most recent
+    `(search, parse)` pair was `parse(q="foo")` even though a later
+    standalone `parse(q="bar")` exists, we predict `parse(q="foo")`.
+    Treats the bigram pair as the unit of evidence; matches what
+    "bigram model" usually means.
 
     No bigram observed for the previous tool yet → returns `[]`. Empty
     history → returns `[]`. The predictor never invents a call from
@@ -119,24 +124,35 @@ class SequencePredictor:
         if len(calls) < 2:
             return []
 
-        # Build bigram counts and remember the most recent ToolCall
-        # instance for each successor name.
+        # Build bigram counts. Separately, track per-successor the most
+        # recent successor *instance* whose predecessor was the latest
+        # tool we just saw — that's the args template the bigram-correct
+        # interpretation wants.
         bigrams: dict[str, Counter[str]] = {}
-        last_seen: dict[str, ToolCall] = {}
         for prev, nxt in zip(calls, calls[1:], strict=False):
             bigrams.setdefault(prev.name, Counter())[nxt.name] += 1
-            last_seen[nxt.name] = nxt
 
         latest_name = calls[-1].name
         if latest_name not in bigrams:
             return []
+
+        # Walk the pair list backward and remember the first (= most recent)
+        # successor instance for each successor name when paired with
+        # `latest_name`. This fixes the "took args from a *standalone* later
+        # successor instance instead of the bigram-paired one" gap.
+        recent_paired: dict[str, ToolCall] = {}
+        for prev, nxt in reversed(list(zip(calls, calls[1:], strict=False))):
+            if prev.name != latest_name:
+                continue
+            if nxt.name not in recent_paired:
+                recent_paired[nxt.name] = nxt
 
         ranked = [n for n, _ in bigrams[latest_name].most_common()]
         eligible = [n for n in ranked if n in idempotent_tools]
 
         out: list[ToolCall] = []
         for name in eligible[:max_predictions]:
-            template = last_seen.get(name)
+            template = recent_paired.get(name)
             if template is None:
                 continue
             # Strip the model-assigned id; the speculator will produce a

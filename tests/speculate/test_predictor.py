@@ -65,11 +65,14 @@ def test_last_call_predictor_picks_most_recent_idempotent_call() -> None:
 def test_last_call_predictor_returns_empty_when_no_idempotent_tools_called() -> None:
     history = [_user_text("nothing here")]
     predictor = LastCallPredictor()
-    assert predictor.predict(
-        history=history,
-        idempotent_tools=_idempotent("search"),
-        max_predictions=2,
-    ) == []
+    assert (
+        predictor.predict(
+            history=history,
+            idempotent_tools=_idempotent("search"),
+            max_predictions=2,
+        )
+        == []
+    )
 
 
 def test_last_call_predictor_honors_history_window_then_max_predictions_cap() -> None:
@@ -135,8 +138,39 @@ def test_sequence_predictor_empty_when_no_bigrams_observed() -> None:
     # Only one call → no bigrams.
     history = [_assistant_tool_use("search", {"q": "x"})]
     predictor = SequencePredictor()
-    assert predictor.predict(
+    assert (
+        predictor.predict(
+            history=history,
+            idempotent_tools=_idempotent("search"),
+            max_predictions=2,
+        )
+        == []
+    )
+
+
+def test_sequence_predictor_inherits_args_from_paired_successor_not_standalone() -> None:
+    """Discriminating test for the bigram-correct arg inheritance.
+
+    The most recent (search → parse) pair has parse(q='paired'). A later
+    *standalone* parse(q='standalone') (whose predecessor is something
+    else) must NOT be the args template — that would be the broken
+    behavior that took args from the most recent successor instance
+    regardless of pairing.
+    """
+    history = [
+        _assistant_tool_use("search", {"q": "1"}),
+        _assistant_tool_use("parse", {"q": "paired"}),  # paired with search
+        _assistant_tool_use("answer", {"q": "1"}),
+        _assistant_tool_use("parse", {"q": "standalone"}),  # paired with answer
+        _assistant_tool_use("search", {"q": "2"}),  # latest predecessor
+    ]
+    predictor = SequencePredictor()
+    out = predictor.predict(
         history=history,
-        idempotent_tools=_idempotent("search"),
-        max_predictions=2,
-    ) == []
+        idempotent_tools=_idempotent("search", "parse", "answer"),
+        max_predictions=1,
+    )
+    assert len(out) == 1
+    assert out[0].name == "parse"
+    # Must inherit from the paired instance, not the most recent one.
+    assert out[0].arguments == {"q": "paired"}

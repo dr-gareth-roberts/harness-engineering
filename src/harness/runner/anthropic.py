@@ -278,9 +278,7 @@ class AnthropicRunner:
                 ]
                 # Mirror into running_history so the next iteration's
                 # speculator.begin sees the tool_results we just sent back.
-                running_history.append(
-                    Message(role="user", content=synthesized_result_blocks)
-                )
+                running_history.append(Message(role="user", content=synthesized_result_blocks))
             finally:
                 if self._speculator is not None:
                     await self._speculator.end()

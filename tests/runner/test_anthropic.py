@@ -356,9 +356,7 @@ class _StubSpeculator:
         dispatcher: Dispatcher,
         hooks: HookRunner,
     ) -> None:
-        self.begin_calls.append(
-            {"history_len": len(history), "agent_name": agent.name}
-        )
+        self.begin_calls.append({"history_len": len(history), "agent_name": agent.name})
 
     async def try_resolve(self, call: ToolCall) -> ToolResult | None:
         self.try_resolve_calls.append(call)

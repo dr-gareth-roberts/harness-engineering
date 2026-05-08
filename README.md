@@ -37,6 +37,7 @@ The "harness" is everything around the model: prompt assembly, tool wiring, perm
 | `harness.attribute`| Causal provenance via leave-one-out ablation; `attribute(session, target, runner, agent, granularity, similarity)` ranks input chunks by influence on a target output. `JaccardSimilarity` / `LengthRatio` zero-dep, `EmbeddingSimilarity` opt-in (extra `[attribute]`) |
 | `harness.cache`    | Prompt-prefix-drift watcher; `PrefixWatcher` satisfies the runner's structural `prefix_watcher=` protocol, fingerprints each cache breakpoint per request, `audit(store, window_hours)` surfaces silent invalidators with `unified_diff`; ships `harness cache-audit` CLI subcommand |
 | `harness.debug`    | `pdb`-flavored debugger for orchestrator runs; `DebugRunner(real_runner, ...)` wraps any runner, pauses on a configurable predicate, exposes a `DebugContext` for inspect / mutate / fire / resume / abort, programmatic and interactive REPL modes; ships `harness debug` CLI subcommand for offline replay debugging |
+| `harness.speculate`| Pre-execute likely tool calls in `asyncio` tasks while the model generates; `Speculator` satisfies the runner's structural `speculator=` protocol, hits skip the runner's `PreToolUse` / dispatch / `PostToolUse` cycle. Ships `LastCallPredictor` and `SequencePredictor` (bigram), or plug a custom `Predictor`. Idempotency is a tool-author promise: speculator only fires for `Tool.idempotent=True` and runs the tool whether the model would have called it or not |
 
 ### CLI
 

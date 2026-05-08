@@ -120,9 +120,7 @@ class Speculator:
             if call.name not in candidates:
                 # Predictor returned a non-eligible tool; ignore it.
                 continue
-            task = asyncio.create_task(
-                self._dispatch_via_hooks(call, dispatcher, hooks)
-            )
+            task = asyncio.create_task(self._dispatch_via_hooks(call, dispatcher, hooks))
             self._pending.append((call, task))
             if self._telemetry is not None:
                 await self._telemetry.emit(SpeculationLaunched(tool_name=call.name))
