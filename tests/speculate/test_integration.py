@@ -138,10 +138,21 @@ async def test_speculation_hit_skips_dispatcher_and_emits_hit_telemetry() -> Non
     assert "SpeculationMiss" not in kinds
 
 
-async def test_speculation_miss_falls_back_and_dispatches_normally() -> None:
+async def test_speculation_miss_telemetry_shape() -> None:
     """End-to-end miss: prior call was search('foo'), model now calls
-    search('bar'). Speculator's pre-dispatch is wasted; runner falls back
-    to its normal dispatch path."""
+    search('bar'). The speculator's prediction doesn't match.
+
+    Note on what this test does NOT assert: the speculator's wasted
+    dispatch (against the *predicted* search('foo')) does not reliably
+    land in the dispatcher log under the all-synchronous fake SDK,
+    because `asyncio.create_task` schedules the dispatch but the fake
+    stream call doesn't yield enough for it to run before end() cancels.
+    In a real run with a network round-trip the speculation would
+    execute and waste a real call. Here we just pin the *telemetry
+    shape*: Launched + Miss, no Hit. The runner's own dispatch of
+    search('bar') is exercised by the existing test_one_iteration_*
+    case in test_anthropic.py — this is the speculator-feedback test.
+    """
     from harness.prompts.messages import ContentBlock, Message
 
     history = [
@@ -185,18 +196,14 @@ async def test_speculation_miss_falls_back_and_dispatches_normally() -> None:
     )
     await runner(_agent(), history)
 
-    # The runner's normal dispatch path ran for search('bar'). The
-    # speculation for search('foo') was scheduled at begin() but the
-    # fake-SDK turn is synchronous (no real network wait), so the
-    # speculation task never got a chance to actually execute before
-    # end() cancelled it. In a real run with a network round-trip this
-    # would be ~200ms of wasted work; in this test we observe just the
-    # real call. Either way, the model's call resolved correctly.
-    assert "bar" in call_log
-    assert len(call_log) <= 2  # at most the speculation also ran
-
-    # Telemetry confirms launch + miss (no hit).
+    # Telemetry confirms the predicted shape: Launched + Miss, no Hit.
     kinds = [type(e).__name__ for e in sink.events]
     assert "SpeculationLaunched" in kinds
     assert "SpeculationMiss" in kinds
     assert "SpeculationHit" not in kinds
+
+    # Sanity: the model's actual call ('bar') reached the dispatcher
+    # via the runner's normal fallback path. (Whether the wasted
+    # speculation also ran depends on event-loop yielding; not part of
+    # the contract this test pins.)
+    assert "bar" in call_log

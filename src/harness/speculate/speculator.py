@@ -134,19 +134,44 @@ class Speculator:
         hooks: HookRunner,
     ) -> ToolResult:
         """Run the same hook + dispatch cycle the runner uses, so a
-        `BlockingPolicy` hook sees speculative calls too."""
-        decisions = await hooks.emit(PreToolUse(call=call))
-        blocked = next((d for d in decisions if d.block), None)
-        if blocked is not None:
-            result = ToolResult(
+        `BlockingPolicy` hook sees speculative calls too.
+
+        Wrapped in a top-level `try/except`: a speculation that raises
+        an exception (e.g. a `PreToolUse`/`PostToolUse` handler that
+        threw) must NOT propagate out through `try_resolve` and crash
+        the runner. The whole point of speculation is that wrong
+        predictions are cheap; a buggy hook in the speculative path
+        should be observably "miss-shaped" to the runner, not a
+        whole-turn crash. We translate any exception into an
+        is_error=True `ToolResult` so the speculation either hits
+        cleanly or the caller's runner can fall back via try_resolve
+        returning a recovered error result.
+
+        Exceptions from `dispatcher.dispatch` itself are already
+        caught inside the dispatcher and surfaced as
+        `ToolResult(is_error=True)` — the dispatcher never raises
+        from a handler bug. The remaining surface this `try/except`
+        guards is hook-handler exceptions.
+        """
+        try:
+            decisions = await hooks.emit(PreToolUse(call=call))
+            blocked = next((d for d in decisions if d.block), None)
+            if blocked is not None:
+                result = ToolResult(
+                    id=call.id,
+                    content=blocked.reason or "blocked by hook (speculation)",
+                    is_error=True,
+                )
+            else:
+                result = await dispatcher.dispatch(call)
+            await hooks.emit(PostToolUse(call=call, result=result))
+            return result
+        except Exception as exc:  # noqa: BLE001 - speculative path must not crash the runner
+            return ToolResult(
                 id=call.id,
-                content=blocked.reason or "blocked by hook (speculation)",
+                content=f"speculation error: {exc!r}",
                 is_error=True,
             )
-        else:
-            result = await dispatcher.dispatch(call)
-        await hooks.emit(PostToolUse(call=call, result=result))
-        return result
 
     async def try_resolve(self, call: ToolCall) -> ToolResult | None:
         match_idx: int | None = None

@@ -319,13 +319,20 @@ async def test_speculative_dispatch_fires_pre_and_post_tool_hooks() -> None:
 
 
 async def test_speculation_runs_in_parallel_with_caller_work() -> None:
-    """Wall-clock proof of concurrency: a speculation that takes 100ms,
-    awaited concurrently with another 100ms task, completes in ~100ms,
-    not ~200ms. This is the latency win speculation exists for.
+    """Wall-clock proof of concurrency: a speculation that takes 200ms,
+    awaited concurrently with another 200ms task, completes in
+    significantly less than 400ms. This is the latency win speculation
+    exists for.
+
+    The discriminating assertion is the *relative* one: parallel must be
+    at least 30% faster than serial would have been. The absolute bound
+    is a sanity check; the relative bound is the actual claim.
     """
+    sleep_per = 0.20
+    serial_baseline = sleep_per * 2  # what running sequentially would take
     dispatcher = _dispatcher(
         idempotent=["search"],
-        slow_handlers={"search": 0.10},
+        slow_handlers={"search": sleep_per},
     )
     speculator = Speculator(LastCallPredictor(history_window=1), max_speculations=1)
 
@@ -336,16 +343,26 @@ async def test_speculation_runs_in_parallel_with_caller_work() -> None:
         dispatcher=dispatcher,
         hooks=HookRunner(),
     )
-    # Caller does 100ms of "model wait" work in parallel.
-    await asyncio.sleep(0.10)
+    # Caller does the same amount of "model wait" work in parallel.
+    await asyncio.sleep(sleep_per)
     # By the time we ask for the result, speculation has already finished
     # — try_resolve returns near-instantly.
     await speculator.try_resolve(ToolCall(name="search", arguments={"q": "x"}, id="m"))
     await speculator.end()
     elapsed = time.perf_counter() - start
 
-    # Generous bound: ~100ms (parallel) << ~200ms (serial). Allow up to 180ms.
-    assert elapsed < 0.18, f"expected ~100ms parallel, got {elapsed * 1000:.0f}ms"
+    # Relative: parallel must be at least 30% faster than serial. This is
+    # what proves the work overlapped, independent of CI scheduler jitter.
+    assert elapsed < serial_baseline * 0.7, (
+        f"parallel ({elapsed * 1000:.0f}ms) was not "
+        f"30% faster than serial ({serial_baseline * 1000:.0f}ms) — "
+        f"speculation does not appear to be running concurrently"
+    )
+    # Absolute sanity: ~one sleep_per plus task-scheduling overhead.
+    # 350ms is generous slack for loaded CI machines.
+    assert elapsed < 0.35, (
+        f"expected ~{sleep_per * 1000:.0f}ms parallel, got {elapsed * 1000:.0f}ms"
+    )
 
 
 async def test_end_cancels_pending_unmatched_speculations() -> None:
@@ -448,3 +465,41 @@ def test_predictor_protocol_accepts_external_strategy() -> None:
 
     p: Predictor = MyPredictor()  # type: ignore[assignment]
     assert p.predict([], {}, 1) == []
+
+
+async def test_hook_exception_during_speculation_does_not_crash_runner() -> None:
+    """A buggy hook handler in the speculative path must not propagate
+    out through `try_resolve` — wrong predictions are supposed to be
+    cheap, and a whole-turn crash because the hook misbehaved during
+    speculation is not cheap. The speculator wraps the dispatch in a
+    try/except and surfaces the failure as an is_error=True ToolResult,
+    which the runner can pass back to the model."""
+    dispatcher = _dispatcher(idempotent=["search"])
+
+    def buggy_hook(_event: PreToolUse) -> None:
+        raise RuntimeError("simulated hook bug")
+
+    hooks = HookRunner()
+    hooks.register(PreToolUse, buggy_hook)
+
+    speculator = Speculator(LastCallPredictor(history_window=1), max_speculations=1)
+    await speculator.begin(
+        history=_history_with_call("search", {"q": "x"}),
+        agent=_agent(["search"]),
+        dispatcher=dispatcher,
+        hooks=hooks,
+    )
+
+    # The speculation task ended in an exception. try_resolve must NOT
+    # propagate it — it should return a ToolResult(is_error=True).
+    result = await speculator.try_resolve(
+        ToolCall(name="search", arguments={"q": "x"}, id="m")
+    )
+    await speculator.end()
+
+    assert result is not None
+    assert result.is_error is True
+    assert "speculation error" in str(result.content)
+    assert "simulated hook bug" in str(result.content)
+    # And the result's id was patched to the model's call id.
+    assert result.id == "m"
