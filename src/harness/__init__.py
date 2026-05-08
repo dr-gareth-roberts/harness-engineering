@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from harness.agents import Orchestrator, SubAgent
 from harness.hooks import HookRunner
+from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
 from harness.policy import AllowList, DenyList
 from harness.prompts import Message
 from harness.telemetry import JSONLSink, MemorySink, Telemetry
@@ -19,11 +20,15 @@ __all__ = [
     "AnthropicRunner",
     "DenyList",
     "Dispatcher",
+    "FileStore",
     "HookRunner",
+    "InMemoryStore",
     "JSONLSink",
     "MemorySink",
     "Message",
     "Orchestrator",
+    "Session",
+    "SessionRecord",
     "SubAgent",
     "Telemetry",
     "Tool",

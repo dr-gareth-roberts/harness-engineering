@@ -11,7 +11,7 @@
 | 0 | MVP scaffold (tools/prompts/hooks/agents/policy) | shipped | PR #1 (`chore/initial-scaffold` → `main`)      |
 | 1 | Real model runner + summarization-compaction | shipped | PR #1                                          |
 | 2 | Telemetry / structured event stream    | shipped     | PR #1                                          |
-| 3 | Persistent memory / session storage    | pending     | TBD                                            |
+| 3 | Persistent memory / session storage    | shipped     | PR #1                                          |
 | 4 | Sandbox execution primitives           | pending     | TBD                                            |
 | 5 | Replay / eval harness                  | pending     | TBD                                            |
 
@@ -485,21 +485,244 @@ finally:
 ## Item 3 — Persistent memory / session storage
 
 ### Goal
-Capture a `SessionRecord` (messages, hook decisions, tool calls, telemetry)
-and persist it via a `MemoryStore` protocol. Ship in-memory + file-based
-implementations. Wire snapshot / restore into `Orchestrator`.
+Capture a `SessionRecord` (id, agent, full message history, metadata, timestamps)
+and persist it via a `MemoryStore` protocol. Ship `InMemoryStore` and `FileStore`
+implementations. Provide a small `Session` helper that wraps an `Orchestrator` +
+`MemoryStore` to give callers a "send a message, get a reply, snapshot
+automatically" surface — the higher-level convenience that turns the per-turn
+runner into a multi-turn conversation.
 
 ### Status
-- Pending.
+- Shipped.
 
 ### Decisions
-_(deferred)_
+- **Vendor-neutral.** The store and record types depend only on `harness.prompts`/`harness.agents`; nothing here imports the Anthropic SDK. Persistence is a pure data layer.
+- **`SessionRecord` is the source of truth.** Pydantic model containing `session_id`, `agent` (full `SubAgent`), `messages` (full conversation history), `created_at`, `updated_at`, and a free-form `metadata: dict[str, Any]`. Serializes to JSON via `model_dump_json()`. Tool calls and decisions are *already in the messages* (as `ContentBlock(type="tool_use"/"tool_result")`); we don't duplicate them at the record level.
+- **`MemoryStore` is a `Protocol`, not an ABC.** Methods: `save(record)`, `load(session_id) -> SessionRecord | None`, `list(*, limit) -> list[SessionRecord]`, `delete(session_id) -> bool`. Mirrors the `Sink` shape from telemetry.
+- **Two implementations.** `InMemoryStore` (dict-backed, async-locked, deep-copy on save/load to prevent caller mutation), `FileStore` (one JSON file per session in a directory, atomic writes via tmp-file + rename). Both lock per-instance with `asyncio.Lock`.
+- **`Session` helper, not Orchestrator wire-in.** Persistence is a higher-level concern than per-turn execution. `Session(orchestrator, agent, store, session_id=…)` holds the message list, exposes `await session.send(text_or_message)` and a `Session.restore(...)` classmethod. The `Orchestrator` itself stays unchanged — keeps the lower layer free of session-state assumptions and aligns with the existing pattern where messages are caller-owned.
+- **`session.send()` accepts `str | Message`.** A bare string becomes `text("user", s)`. Convenience over ceremony.
+- **No torn writes (not full crash safety).** `FileStore.save` writes to `{name}.tmp` and `os.replace()` to the final path. `os.replace` is atomic on POSIX and on Windows (same-volume, no open handles). This guarantees no reader sees a partially-written file — but without `fsync` it does NOT guarantee the rename survives sudden power loss; on a crash you'll see either the previous good copy or the new one, not garbage. That's the right MVP trade-off; we document this contract precisely. `InMemoryStore.save` deep-copies the record (`model_copy(deep=True)`) so subsequent caller mutations don't bleed into stored state.
+- **Tmp filename is unambiguous.** Use `path.parent / (path.name + ".tmp")`, not `path.with_suffix(".tmp")` — the latter has interpretation edge cases when the session_id contains dots.
+- **`list()` returns most-recently-updated first.** Both stores sort by `updated_at` descending so the contract is consistent regardless of backend (the directory walk for `FileStore` would otherwise have filesystem-defined order).
+- **`Session` is single-writer per session_id.** Two concurrent `Session.restore(same_id)` instances racing `send()` is a last-writer-wins race; the second save silently overwrites the first. Documented in the `Session` docstring as the caller's responsibility — optimistic concurrency / etag preconditions are deferred to a follow-up.
+- **No automatic load on Session construction.** `Session(...)` always starts fresh; `Session.restore(...)` is the explicit path. This avoids a surprising "did I get an empty session or a hydrated one?" question at construction time.
 
 ### Plan
-_(deferred)_
+
+#### Architecture
+
+```mermaid
+graph LR
+    user["caller"] -->|send| sess["Session"]
+    sess -->|run| orch["Orchestrator"]
+    sess -->|save| store["MemoryStore"]
+    store --> mem["InMemoryStore"]
+    store --> fs["FileStore"]
+    sess -.restore.-> store
+```
+
+#### Files
+
+**New:**
+- `src/harness/memory/__init__.py`
+- `src/harness/memory/record.py` — `SessionRecord`, `SessionNotFound` exception
+- `src/harness/memory/store.py` — `MemoryStore` protocol, `InMemoryStore`, `FileStore`
+- `src/harness/memory/session.py` — `Session` helper
+- `tests/memory/__init__.py`
+- `tests/memory/test_record.py` — round-trips, timestamps, custom metadata
+- `tests/memory/test_store.py` — parametrized across both stores: save/load/list/delete, missing-ID returns None, deep-copy isolation, FileStore atomicity (write + crash sim by leaving a `.tmp` file)
+- `tests/memory/test_session.py` — send accumulates messages, save fires after each turn, restore round-trips a stored session
+
+**Modified:**
+- `src/harness/__init__.py` — add `Session`, `SessionRecord`, `InMemoryStore`, `FileStore`
+- `README.md` — module table row
+- `progress.md` — status + log
+
+#### `SessionRecord`
+
+```python
+class SessionRecord(BaseModel):
+    session_id: str
+    agent: SubAgent
+    messages: list[Message] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    def touched(self) -> "SessionRecord":
+        """Return a copy with `updated_at` set to now."""
+        return self.model_copy(update={"updated_at": datetime.now(UTC)})
+```
+
+#### `MemoryStore` protocol
+
+```python
+class MemoryStore(Protocol):
+    async def save(self, record: SessionRecord) -> None: ...
+    async def load(self, session_id: str) -> SessionRecord | None: ...
+    async def list(self, *, limit: int = 100) -> list[SessionRecord]: ...
+    async def delete(self, session_id: str) -> bool: ...   # True if a record was removed
+```
+
+#### `InMemoryStore`
+
+```python
+class InMemoryStore:
+    def __init__(self) -> None:
+        self._records: dict[str, SessionRecord] = {}
+        self._lock = asyncio.Lock()
+
+    async def save(self, record):
+        async with self._lock:
+            self._records[record.session_id] = record.model_copy(deep=True)
+
+    async def load(self, session_id):
+        async with self._lock:
+            r = self._records.get(session_id)
+            return r.model_copy(deep=True) if r is not None else None
+    # list / delete similarly
+```
+
+#### `FileStore`
+
+```python
+class FileStore:
+    """One JSON file per session in `root`. Atomic writes via tmp + rename."""
+
+    def __init__(self, root: Path | str) -> None:
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._lock = asyncio.Lock()
+
+    def _path_for(self, session_id: str) -> Path:
+        # session_id is caller-provided; sanitize against path traversal
+        if "/" in session_id or "\\" in session_id or session_id.startswith("."):
+            raise ValueError(f"unsafe session_id: {session_id!r}")
+        return self._root / f"{session_id}.json"
+
+    async def save(self, record):
+        path = self._path_for(record.session_id)
+        tmp = path.parent / (path.name + ".tmp")    # avoids with_suffix dot edge cases
+        async with self._lock:
+            tmp.write_text(record.model_dump_json(), encoding="utf-8")
+            os.replace(tmp, path)
+
+    async def load(self, session_id):
+        path = self._path_for(session_id)
+        async with self._lock:
+            if not path.exists():
+                return None
+            return SessionRecord.model_validate_json(path.read_text(encoding="utf-8"))
+    # list iterates root, delete unlinks
+```
+
+#### `Session` helper
+
+```python
+class Session:
+    def __init__(
+        self,
+        orchestrator: Orchestrator,
+        agent: SubAgent,
+        store: MemoryStore,
+        *,
+        session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    @property
+    def messages(self) -> list[Message]: ...    # read-only view (returns a copy)
+
+    async def send(self, message: str | Message) -> Message:
+        msg = text("user", message) if isinstance(message, str) else message
+        self._messages.append(msg)
+        reply = await self._orch.run(self._agent, self._messages)
+        self._messages.append(reply)
+        await self._store.save(self._to_record())
+        return reply
+
+    @classmethod
+    async def restore(
+        cls,
+        session_id: str,
+        store: MemoryStore,
+        orchestrator: Orchestrator,
+    ) -> "Session":
+        record = await store.load(session_id)
+        if record is None:
+            raise SessionNotFound(session_id)
+        s = cls(orchestrator, record.agent, store, session_id=session_id, metadata=record.metadata)
+        s._messages = list(record.messages)
+        return s
+
+    def _to_record(self) -> SessionRecord:
+        return SessionRecord(
+            session_id=self._session_id,
+            agent=self._agent,
+            messages=list(self._messages),
+            metadata=self._metadata,
+            created_at=self._created_at,        # preserved across saves
+            updated_at=datetime.now(UTC),
+        )
+```
+
+#### Tests
+
+`tests/memory/test_record.py`:
+1. JSON round-trip preserves all fields including agent.
+2. `touched()` advances `updated_at` without mutating `created_at`.
+3. Records with tool_use / tool_result content blocks survive a round-trip.
+
+`tests/memory/test_store.py` (parametrized over `InMemoryStore`, `FileStore`):
+1. `save` then `load` returns an equal record.
+2. `load` of a missing ID returns `None`.
+3. `list` returns all records up to `limit`.
+4. `delete` removes the record and returns `True`; deleting a missing ID returns `False`.
+5. Deep-copy isolation: mutating the loaded record does not affect the stored copy.
+6. Concurrency, distinct IDs: `asyncio.gather` of 8 concurrent `save(record_i)` with 8 distinct session_ids — final state contains all 8 records.
+7. Concurrency, same ID: `asyncio.gather` of 8 concurrent `save(...)` with the *same* session_id but different `metadata` — final state equals exactly one of the 8 inputs (no torn / merged record). This is the test that distinguishes "lock works" from "we got lucky".
+8. `list` returns records sorted by `updated_at` descending across both backends.
+9. (FileStore-only) Path-traversal session IDs (`../etc`) raise `ValueError`.
+10. (FileStore-only) Stray `.tmp` files in the root are ignored by `list`.
+
+`tests/memory/test_session.py`:
+1. `send("hi")` appends a user text message, calls runner, appends assistant reply, saves a record with both messages.
+2. Multiple `send()` calls accumulate; saved record has the full history.
+3. `restore(session_id, store, orch)` returns a `Session` with the prior messages; subsequent `send` continues from there.
+4. `restore` of a missing ID raises `SessionNotFound`.
+5. Custom `metadata` round-trips through save/restore.
+
+#### Verification
+
+- `uv sync --extra dev --extra anthropic` — clean.
+- `uv run pytest` — green.
+- `uv run ruff check .` — clean.
+- `uv run mypy` — clean (strict).
+
+#### Out of scope (deferred)
+
+- SQL-backed `MemoryStore`. Easy follow-up; the protocol is exactly the right shape.
+- Streaming/incremental save (only full snapshots in MVP).
+- Multi-process locking for `FileStore` (in-process locking only).
+- Encryption-at-rest.
 
 ### Implementation log
-_(deferred)_
+
+- **Plan reviewed by advisor.** Four blocking/concrete items addressed before code:
+  - Tmp filename uses `path.parent / (path.name + ".tmp")` instead of `path.with_suffix(".tmp")` to dodge dot-suffix interpretation edge cases (e.g. `session_id="v1.2"`).
+  - Tightened the durability claim in the docstring: `os.replace()` gives "no torn writes," not full crash safety. Without `fsync()`, sudden power loss can leave either the old or new copy as the survivor; documented precisely.
+  - Added a same-session-id concurrency test that gathers 8 concurrent `save()` calls with distinct metadata and asserts the final record matches exactly one of the inputs verbatim — the test that distinguishes "lock works" from "lock unnecessary."
+  - `list()` sorts by `updated_at` descending in both `InMemoryStore` and `FileStore` so the contract is consistent regardless of backend.
+- **`Session` is single-writer per session_id.** Two concurrent `restore(same_id)` instances racing `send()` is last-writer-wins; documented in the class docstring as a caller responsibility. Optimistic concurrency via etag/precondition deferred.
+- **Path-traversal guard.** `FileStore._path_for()` rejects `session_id` values with `/`, `\`, leading `.`, or empty string. Test exercises all four.
+- **Top-level re-exports.** `Session`, `SessionRecord`, `InMemoryStore`, `FileStore` available from `harness` directly.
+- **Verification (final gates).**
+  - `uv sync --extra dev --extra anthropic` — clean.
+  - `uv run pytest` — 96 passed (was 69; +27 memory).
+  - `uv run ruff check .` — clean.
+  - `uv run mypy` — clean (strict, 26 source files).
+- **Commit:** `feat(memory): SessionRecord + MemoryStore (InMemory/File) + Session helper` (TBD on push).
 
 ---
 
