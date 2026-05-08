@@ -54,6 +54,7 @@ from harness.replay import (
 )
 from harness.runner import CannedRunner, EchoRunner
 from harness.sandbox import PathPolicy, PathScope, safe_subprocess_run, scrub_env
+from harness.speculate import LastCallPredictor, SequencePredictor, Speculator
 from harness.telemetry import JSONLSink, MemorySink, Telemetry
 from harness.tools import Dispatcher, Tool
 
@@ -91,6 +92,7 @@ __all__ = [
     "InsertTurn",
     "JSONLSink",
     "JaccardSimilarity",
+    "LastCallPredictor",
     "LengthRatio",
     "MemorySink",
     "Message",
@@ -112,8 +114,10 @@ __all__ = [
     "ReplayRunner",
     "RewriteTurn",
     "SECRET_PACK",
+    "SequencePredictor",
     "Session",
     "SessionRecord",
+    "Speculator",
     "SubAgent",
     "Telemetry",
     "Tool",
