@@ -1,0 +1,91 @@
+site_name: harness-engineering
+site_description: Reusable building blocks for the layer around an LLM.
+repo_url: https://github.com/dr-gareth-roberts/harness-engineering
+repo_name: harness-engineering
+edit_uri: ""
+
+# Render docs/ as the source. We hand-write a small landing page +
+# per-module pages that delegate to mkdocstrings for the API surface,
+# rather than auto-generating the entire site. Hand-written + auto-API
+# splits well: the reader gets a curated tour, but the API stays
+# canonical-from-source.
+docs_dir: docs
+site_dir: site
+# The wave archives under docs/waves/ are wave-by-wave decision logs
+# we want to keep in the repo, but they're linked from `roadmap.md`
+# via GitHub URLs rather than rendered into the site. Excluding them
+# silences the "pages exist but are not in nav" warning at build time.
+exclude_docs: |
+  waves/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - content.tabs.link
+  palette:
+    - scheme: default
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+# mkdocstrings auto-generates API reference from docstrings on the
+# pages where we drop a `::: harness.<module>` block. Format defaults
+# to "google" — our docstrings mostly read as plain prose plus
+# bulleted argument lists, which renders cleanly enough.
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            heading_level: 2
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - CLI: cli.md
+  - Modules:
+      - tools: modules/tools.md
+      - prompts: modules/prompts.md
+      - hooks: modules/hooks.md
+      - policy: modules/policy.md
+      - agents: modules/agents.md
+      - runner: modules/runner.md
+      - telemetry: modules/telemetry.md
+      - memory: modules/memory.md
+      - sandbox: modules/sandbox.md
+      - replay: modules/replay.md
+      - contracts: modules/contracts.md
+      - privacy: modules/privacy.md
+      - plan: modules/plan.md
+      - fuzz: modules/fuzz.md
+      - attribute: modules/attribute.md
+      - cache: modules/cache.md
+      - debug: modules/debug.md
+      - speculate: modules/speculate.md
+  - Roadmap: roadmap.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true

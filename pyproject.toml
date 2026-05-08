@@ -23,6 +23,11 @@ openai-compat = ["openai>=1.40"]
 fuzz = ["hypothesis>=6"]
 attribute = ["sentence-transformers>=2"]
 otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
+docs = [
+  "mkdocs>=1.6",
+  "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.25",
+]
 
 [project.scripts]
 harness = "harness.cli:main"

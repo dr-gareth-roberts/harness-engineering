@@ -573,5 +573,3 @@ def test_module_imports_clean() -> None:
         StackFrame,
         Variable,
     )
-
-
