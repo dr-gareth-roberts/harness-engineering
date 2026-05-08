@@ -25,6 +25,7 @@ flag is a *promise* by the tool author; see `Speculator`'s class
 docstring for the semantics.
 """
 
+from harness.speculate.cross_session import CrossSessionPredictor
 from harness.speculate.events import (
     SpeculationHit,
     SpeculationLaunched,
@@ -38,6 +39,7 @@ from harness.speculate.predictor import (
 from harness.speculate.speculator import Speculator
 
 __all__ = [
+    "CrossSessionPredictor",
     "LastCallPredictor",
     "Predictor",
     "SequencePredictor",

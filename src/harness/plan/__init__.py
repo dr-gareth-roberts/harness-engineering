@@ -12,6 +12,7 @@ what evaluates per-step matches inside the guard.
 
 from harness.plan.derive import derive_plan
 from harness.plan.guard import PlanGuardedRunner
+from harness.plan.infer import infer_plan_from_records
 from harness.plan.plan import Plan, PlanMode, PlannedToolCall, PlanViolation
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "PlanViolation",
     "PlannedToolCall",
     "derive_plan",
+    "infer_plan_from_records",
 ]

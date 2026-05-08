@@ -27,7 +27,13 @@ from harness.debug import DebugAborted, DebugContext, DebugRunner
 from harness.fuzz import FuzzReport, fuzz_agent, fuzz_tool, harness_property
 from harness.hooks import HookRunner
 from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
-from harness.plan import Plan, PlanGuardedRunner, PlannedToolCall, PlanViolation
+from harness.plan import (
+    Plan,
+    PlanGuardedRunner,
+    PlannedToolCall,
+    PlanViolation,
+    infer_plan_from_records,
+)
 from harness.policy import AllowList, DenyList
 from harness.privacy import (
     PII_PACK,
@@ -54,13 +60,19 @@ from harness.replay import (
 )
 from harness.runner import CannedRunner, EchoRunner
 from harness.sandbox import PathPolicy, PathScope, safe_subprocess_run, scrub_env
-from harness.speculate import LastCallPredictor, SequencePredictor, Speculator
+from harness.speculate import (
+    CrossSessionPredictor,
+    LastCallPredictor,
+    SequencePredictor,
+    Speculator,
+)
 from harness.telemetry import JSONLSink, MemorySink, Telemetry
 from harness.tools import Dispatcher, Tool
 
 if TYPE_CHECKING:
     from harness.runner.anthropic import AnthropicRunner
     from harness.runner.openai_compat import OpenAICompatRunner
+    from harness.telemetry.otel import OpenTelemetrySink
 
 __version__ = "0.0.1"
 
@@ -72,6 +84,7 @@ __all__ = [
     "CannedRunner",
     "Contract",
     "ContractViolation",
+    "CrossSessionPredictor",
     "DebugAborted",
     "DebugContext",
     "DebugRunner",
@@ -98,6 +111,7 @@ __all__ = [
     "Message",
     "Mutation",
     "OpenAICompatRunner",
+    "OpenTelemetrySink",
     "Orchestrator",
     "PII_PACK",
     "PathPolicy",
@@ -132,6 +146,7 @@ __all__ = [
     "fuzz_agent",
     "fuzz_tool",
     "harness_property",
+    "infer_plan_from_records",
     "run_eval",
     "safe_subprocess_run",
     "scrub_env",
@@ -147,4 +162,8 @@ def __getattr__(name: str) -> Any:
         from harness.runner import OpenAICompatRunner
 
         return OpenAICompatRunner
+    if name == "OpenTelemetrySink":
+        from harness.telemetry.otel import OpenTelemetrySink
+
+        return OpenTelemetrySink
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
