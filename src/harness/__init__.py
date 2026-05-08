@@ -23,7 +23,7 @@ from harness.contracts import (
     attach_contracts,
     check,
 )
-from harness.debug import DebugContext, DebugRunner
+from harness.debug import DebugAborted, DebugContext, DebugRunner
 from harness.fuzz import FuzzReport, fuzz_agent, fuzz_tool, harness_property
 from harness.hooks import HookRunner
 from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
@@ -71,6 +71,7 @@ __all__ = [
     "CannedRunner",
     "Contract",
     "ContractViolation",
+    "DebugAborted",
     "DebugContext",
     "DebugRunner",
     "DeleteTurn",
