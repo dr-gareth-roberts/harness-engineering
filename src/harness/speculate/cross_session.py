@@ -23,6 +23,18 @@ Design notes (pinned from the spec / advisor review):
   `Predictor.predict` is sync. We resolve this with an async classmethod
   factory `from_store(...)` that loads once at construction time. The
   resulting instance is plain-sync usable.
+
+Coupling invariant:
+    `CrossSessionPredictor` inherits its arg-inheritance semantics from
+    `SequencePredictor` — specifically, the bigram-paired-successor walk
+    that picks args from the most-recent paired instance of the predicted
+    tool. We deliberately reverse the records to chronological order
+    before building the synthetic history so that "most recent paired"
+    resolves to the newest session's calls. If `SequencePredictor` ever
+    changes its arg-inheritance strategy (e.g. from "most recent paired"
+    to "most frequent paired"), this predictor's behavior changes with
+    it. The reversal here is load-bearing only against the current
+    `SequencePredictor` contract.
 """
 
 from __future__ import annotations
