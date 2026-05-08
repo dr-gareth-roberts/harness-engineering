@@ -78,6 +78,23 @@ def attach_contracts(
     across the registered handlers — `Earlier(...).when(...)` etc. retain
     state for the lifetime of an `Orchestrator.run`. A `SessionStart` handler
     resets each DFA so a single `HookRunner` can drive multiple runs cleanly.
+
+    Observable events at runtime (current scope):
+        * `SessionStart` — DFAs reset.
+        * `PromptSubmit` — synthesized as a user-text `Message`.
+        * `PreToolUse`   — synthesized as an assistant `tool_use` `Message`.
+                           This is where `forbid` contracts most commonly
+                           block. Returns `HookDecision(block=True)` on match.
+        * `PostToolUse`  — synthesized as a user `tool_result` `Message`.
+        * `SessionEnd`   — DFAs finalize; unmet `require` contracts raise
+                           `ContractViolation`.
+
+    Not yet observed at runtime: assistant *text* messages. There is no
+    `PostAssistantMessage` event in `harness.hooks` yet, so a contract such
+    as `Never(RoleIs("assistant") & TextMatches(...))` will fire correctly
+    against a recorded `SessionRecord` via `harness.contracts.check` but
+    will NOT fire live until the corresponding hook event lands. Use the
+    offline `check` for assistant-text invariants today.
     """
     dfas = [compile_contract(c) for c in contracts]
 
