@@ -18,13 +18,15 @@
 | Wave 6 | Per-event speculator cancellation (`observe` / `cancel_unobserved`) | shipped | [docs/waves/wave-6.md](docs/waves/wave-6.md) |
 | Wave 7 | DAP for debug REPL (`harness debug --dap`)        | shipped | [docs/waves/wave-7.md](docs/waves/wave-7.md) |
 | Wave 8 | Polish + docs site + hardening                    | shipped | [docs/waves/wave-8.md](docs/waves/wave-8.md) |
-| Wave 9 | CI/CD + governance + housekeeping                  | shipped | (current — see below)                            |
+| Wave 9 | CI/CD + governance + housekeeping                  | shipped | [docs/waves/wave-9.md](docs/waves/wave-9.md) |
+| Wave 10 | Vendor runner parity + robustness                 | shipped | (current — see below)                            |
 
-**Status: 10 of 10 standout features shipped, plus Waves 5–9 polish.**
+**Status: 10 of 10 standout features shipped, plus Waves 5–10 polish.**
 The forward plan from `0.2.0` to `1.0` lives in
 [`docs/plan.md`](docs/plan.md): five waves (9 through 13), ~13–15
 developer-days, every gap from the Wave 8 audit assigned to a wave.
-Wave 9 just shipped (8 of those gaps cleared).
+Waves 9–10 shipped (13 of those gaps cleared; #1, #2, #7, #8, #9, #10,
+#11, #15, #16, #17, #18, #19, #20 remain across Waves 11–13).
 
 ## Cross-cutting decisions
 
@@ -55,80 +57,70 @@ Wave 9 just shipped (8 of those gaps cleared).
 ---
 
 
-## Wave 9 — CI/CD + governance + housekeeping
+## Wave 10 — Vendor runner parity + robustness
 
 ### Goal
-Move from "tests pass on my machine" to "the project's gate runs on
-every PR, the package is installable from PyPI, the docs are reachable
-on the web, and the contributor flow is documented." Mostly mechanical
-work with high signal-to-noise — the first wave executed against the
-forward plan in [`docs/plan.md`](docs/plan.md).
+Bring `OpenAICompatRunner` to feature-parity with `AnthropicRunner` on
+the speculator surface; make both runners safe to use under production
+conditions (transient errors, slow upstream, hooks that want to rewrite
+messages); enforce Anthropic's cache-breakpoint cap client-side.
 
 ### Status
-Shipped on `feature/wave-9-cicd-governance`. Eight items from the
-28-gap audit cleared in one pass:
-#21 (mypy on tests), #22 (CI), #23 (Pages), #24 (CHANGELOG), #25
-(CONTRIBUTING), #26 (SECURITY), #27 (rotate progress.md), #28
-(release / PyPI).
+Shipped on `feature/wave-10-runner-parity`. Five gaps cleared (#3, #4,
+#5, #6, #12 from `docs/plan.md`).
 
-### Governance docs
+### What landed
 
-| File | Contents |
-| --- | --- |
-| `CHANGELOG.md` | Keep-a-Changelog format. `0.2.0` entry distills Waves 1–8 into user-visible one-liners; `0.0.1` covers the MVP scaffold; `[Unreleased]` opens for Wave 10+ work. |
-| `CONTRIBUTING.md` | dev setup (`uv sync --extra dev`), running the gate locally, building docs, commit conventions (imperative mood, no emoji, conventional-commits-style), PR expectations, releasing flow + one-time GitHub setup (PyPI trusted publisher + Pages source). |
-| `SECURITY.md` | scope of the package's privacy/secret detection, responsible disclosure flow (GitHub Security Advisory preferred), 5-day-acknowledge / 14-day-triage / 30-day-patch SLOs, supported versions table, threat model summary, what the policy explicitly does *not* cover. |
-
-### CI workflows
-
-| Workflow | Trigger | What |
+| # | Item | Implementation |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | PR + push to main | Matrix Python 3.11 / 3.12 / 3.13. Runs ruff check, ruff format check, **mypy --strict src tests**, pytest, mkdocs build --strict, uv build. Cancel-in-progress on rapid pushes. uv version pinned. |
-| `.github/workflows/release.yml` | Tag `v*` | Re-run gate against the tagged commit, build wheel + sdist, publish to PyPI via OIDC trusted publishing. `pypi` environment matches the trusted-publisher config. No API token in the repo. |
-| `.github/workflows/docs.yml` | Push to main | Build MkDocs site, upload as Pages artifact, deploy via `actions/deploy-pages@v4`. Requires Pages source = "GitHub Actions" (one-time setting). |
+| 12 | Cache-breakpoint cap | `_count_cache_breakpoints` walks the request before each iteration's SDK call; if the count exceeds 4, raises typed `CacheBreakpointLimitExceeded` (a `ValueError`). The check fires *per iteration* because tool_results we feed back may carry their own `cache_control` markers. |
+| 6  | Per-iteration timeout | `timeout_s: float \| None = None` kwarg on both runners. AnthropicRunner wraps the entire stream context (`__aenter__`, every `__anext__`, `__aexit__`, `get_final_message`) via a small `_TimeoutStreamCtx` adapter. OpenAICompat wraps the chat-completions create call. Default `None` = no timeout (matches the SDK's own behavior). Retry/backoff is **deferred** — clean retry semantics across streaming + speculator state require more design than the wave budgets. Documented inline. |
+| 5  | `HookDecision.replacement` | Both runners now honor `replacement` on `PreToolUse` (skip dispatch, use the supplied `ToolResult` with id patched) and on `PostToolUse` (rewrite the dispatched result before sending back to the model). Pre-Wave-10 only `block` was honored — `replacement` was silently ignored. |
+| 4  | `pause_turn` / `refusal` events | Two new event types: `harness.hooks.PauseTurn` (carries the partial assistant message + reason) and `harness.hooks.Refusal` (carries the refusal-only message). AnthropicRunner emits these instead of raising on those stop_reasons; the partial assistant message is returned so callers can resume / inspect. |
+| 3  | OpenAICompat speculator parity | `OpenAICompatRunner` now surfaces emitted `tool_call`s to `speculator.observe()` and calls `cancel_unobserved()` *before* the early-return for `stop`/`length` — text-only iterations still cancel any unmatched specs. Functional parity with `AnthropicRunner` Wave 6 cancellation timing. **Streaming refactor deferred**: the chat-completions API is invoked non-streaming today; switching to streaming with per-chunk observation is incremental on top of this and queued for a future wave. The bug surfaced by the parity test (`cancel_unobserved` was inside the tool_calls branch) is now fixed. |
 
-One-time GitHub-side setup is documented in `CONTRIBUTING.md` ("Releasing"
-section): PyPI trusted publisher, Pages source switch.
+### Tests added
 
-### Housekeeping — progress.md rotation
-
-Waves 3–7 (and now 8) rotated to `docs/waves/wave-{3..8}.md`, mirroring
-the existing pattern where Waves 1–2 were already archived. progress.md
-goes from ~898 lines (everything inline) to ~150 lines (status snapshot
-+ cross-cutting decisions + current wave). The status snapshot table
-gains archive-link rows for Waves 3–8.
-
-### Hardening — `mypy --strict src tests` clean
-
-The 62 mypy errors in `tests/` (pre-existing across Waves 1–8) cleared
-to **zero**. Three categories:
-
-| Category | Count | Fix |
+| File | Count | Coverage |
 | --- | --- | --- |
-| `Tool.handler` variance: tests pass `Callable[[MySpecificModel], ...]` where the type alias declared `Callable[[BaseModel], ...]` | 19 | Widen `ToolHandler` to `Callable[[Any], ...]` — runtime validation via `input_model.model_validate(...)` is the actual contract; type-laxity matches reality. Documented inline. |
-| `lambda e: list.append(e) or None` triggering `func-returns-value` on the LHS of `or` | 8 | Drop the redundant `or None` — `append` returns None implicitly, satisfying hook handler signature. |
-| Stale `# type: ignore` comments mypy now flags as unused | 6 | Remove. |
-| Other (missing type args, missing isinstance narrowings, missing imports, narrow `direction: Literal[...]`, etc.) | 29 | Surgical fixes per call site. |
+| `tests/runner/test_anthropic.py` | 11 | 4 cache-breakpoint cap (helper unit + zero-args helper + over-cap raises + boundary at 4 passes); 2 timeout (raises with delay + completes without); 2 replacement (PreToolUse short-circuits, PostToolUse rewrites); 2 pause_turn/refusal events; 1 unknown-stop-reason still raises (regression of Wave 4 behavior). |
+| `tests/runner/test_openai_compat.py` | 4 | 2 timeout (raises / completes); 1 PreToolUse replacement parity; 2 #3 parity (observe per tool_call + cancel_unobserved fires per iteration even text-only). |
 
-The CI gate now runs `mypy --strict src tests` (was `src/harness` only).
+15 new tests, **510 total** (was 495).
 
-### Verification
+### Verification gate
 
 ```
-uv build                                 — wheel + sdist build cleanly
-uv run mkdocs build --strict             — clean, ~1s
-uv run ruff check                        — clean
-uv run ruff format --check               — 171 files clean
-uv run mypy --strict src tests           — clean (156 source files)
-uv run pytest -q                          — 495 passed
+ruff check                       — clean
+ruff format --check             — 171 files clean
+mypy --strict src tests         — clean (156 source files)
+pytest                           — 510 passed
+mkdocs build --strict           — clean (~1s)
+uv build                         — wheel + sdist build cleanly
 ```
+
+### Deferred from this wave
+
+- **Retry/backoff across streaming + speculator state** — clean
+  semantics require resetting speculator state on retry, which adds
+  complexity not warranted by the perf win. Tracking under #6 in the
+  plan as "follow-up".
+- **OpenAICompat streaming refactor for per-chunk speculator
+  observation** — the non-streaming + post-response observe achieves
+  the same cancellation timing as Wave 6's AnthropicRunner. The
+  per-chunk variant would only matter for adapters that want to
+  cancel mid-stream (Wave 13 #2 territory).
+- **`content_filter` finish_reason as an event** on OpenAICompat —
+  symmetric to the Anthropic `pause_turn`/`refusal` work, deferred
+  for the next vendor-runner pass.
 
 ### Commits
 
 ```
-*  chore(governance): CHANGELOG + CONTRIBUTING + SECURITY
-*  ci: PR/push gate + tag-driven PyPI release + docs deploy workflows
-*  chore(progress): rotate Waves 3-8 to docs/waves/, keep prelude inline
-*  chore(types): mypy --strict src tests clean (62 errors -> 0)
-*  docs: progress.md log of Wave 9
+*  feat(runner): cache-breakpoint cap enforcement + CacheBreakpointLimitExceeded
+*  feat(runner): per-iteration timeout_s on both vendor runners
+*  feat(runner): honor HookDecision.replacement (PreToolUse + PostToolUse)
+*  feat(hooks): PauseTurn + Refusal events; AnthropicRunner emits instead of raising
+*  feat(runner): OpenAICompat surfaces tool_calls to speculator.observe + cancel_unobserved
+*  docs: progress.md log of Wave 10
 ```

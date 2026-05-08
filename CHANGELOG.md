@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `harness.runner.anthropic.CacheBreakpointLimitExceeded` (Wave 10 #12) —
+  raised when a request would exceed Anthropic's 4-cache-breakpoint cap,
+  surfacing the failure at the harness boundary rather than as an
+  opaque API 400.
+- `timeout_s` kwarg on `AnthropicRunner` and `OpenAICompatRunner`
+  (Wave 10 #6) — wraps the SDK call in `asyncio.wait_for`. Default
+  `None` (no timeout). Per-iteration, not per-call.
+- `harness.hooks.PauseTurn` and `harness.hooks.Refusal` events (Wave
+  10 #4) — `AnthropicRunner` now emits these instead of raising on
+  `pause_turn` / `refusal` stop reasons; the partial assistant message
+  is returned so callers can resume / inspect.
+- `OpenAICompatRunner` now surfaces emitted `tool_call`s to
+  `speculator.observe()` and calls `cancel_unobserved()` before
+  dispatch (Wave 10 #3) — feature parity with `AnthropicRunner`'s
+  Wave 6 cancellation timing.
+
+### Changed
+
+- Both runners honor `HookDecision.replacement` (Wave 10 #5) —
+  `PreToolUse` replacement short-circuits dispatch with the supplied
+  `ToolResult` (id patched to the model's call id); `PostToolUse`
+  replacement rewrites the dispatched result before it's sent back to
+  the model. Pre-Wave-10 only `block` was honored.
+
+
 ## [0.2.0] — 2026-05-09
 
 The "ten standout features" milestone. Every item from `designs/standout.md`
