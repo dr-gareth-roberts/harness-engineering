@@ -10,7 +10,7 @@
 | - | -------------------------------------- | ----------- | ---------------------------------------------- |
 | 0 | MVP scaffold (tools/prompts/hooks/agents/policy) | shipped | PR #1 (`chore/initial-scaffold` → `main`)      |
 | 1 | Real model runner + summarization-compaction | shipped | PR #1                                          |
-| 2 | Telemetry / structured event stream    | pending     | TBD                                            |
+| 2 | Telemetry / structured event stream    | shipped     | PR #1                                          |
 | 3 | Persistent memory / session storage    | pending     | TBD                                            |
 | 4 | Sandbox execution primitives           | pending     | TBD                                            |
 | 5 | Replay / eval harness                  | pending     | TBD                                            |
@@ -274,21 +274,211 @@ Same gates as the MVP, plus the example:
 ## Item 2 — Telemetry / structured event stream
 
 ### Goal
-Emit a typed event stream covering every hook firing, dispatcher call, and
-orchestrator turn. Provide pluggable sinks (JSONL → file or stdout, optional
-OpenTelemetry). Keep the core import path zero-dependency on OTel.
+Emit a typed event stream covering every dispatcher call and orchestrator turn,
+with timestamps and durations. Provide a pluggable `Sink` protocol with a few
+concrete implementations (Null / Memory / JSONL / Multi). Keep the base install
+zero-dependency; OTel integration is deferred (the structure leaves room).
 
 ### Status
-- Pending.
+- Shipped.
 
 ### Decisions
-_(deferred until item 1 lands)_
+- **Separate from hooks.** `harness.hooks` is about *control* (`HookDecision.block`); telemetry is about *observation* — sinks never block the run, never delay it materially, and never crash it. Sink errors are swallowed at the `Telemetry` boundary. Different audience, different semantics, different module.
+- **Pydantic event types.** `TelemetryEvent` base + concrete subclasses (`ToolDispatched`, `OrchestratorTurn`). Carries `event_id: UUID`, `timestamp: datetime`, plus payload-specific fields (durations in ms, agent names, tool names, error strings). Schema evolves freely without affecting `harness.hooks.events`.
+- **`Sink` is a Protocol, not an ABC.** Anyone with `async emit(event)` qualifies. We ship `NullSink` (default), `MemorySink` (testing), `JSONLSink` (file or stream), `MultiSink` (fan-out). OTel sink lands later under `[otel]`.
+- **Wire-in is opt-in via constructor injection.** `Dispatcher(tools, *, telemetry=None)` and `Orchestrator(dispatcher, hooks, runner, *, telemetry=None)` both accept an optional `Telemetry` instance. Default `None` → no events emitted, no overhead, no behaviour change for existing callers. This is backward-compatible because `Dispatcher`'s positional contract (the iterable of tools) is unchanged.
+- **MVP scope is dispatcher + orchestrator only.** `AnthropicRunner` is not instrumented in this round (its tool calls already flow through `Dispatcher`, so `ToolDispatched` events still fire). `HookRunner` is not instrumented either — adding a `HookFired` event would also be useful but each module touched expands scope; defer to a follow-up if user demand surfaces.
+- **Failure isolation at the recorder, not the sink.** `Telemetry.emit()` wraps each `await sink.emit(event)` in `try/except Exception` and logs at WARNING via the stdlib `logging` module. The base library never silently swallows errors except at this one boundary. `MultiSink` does the same per-sink so one failing sink doesn't poison the others.
+- **No background task or async queue.** `await telemetry.emit(...)` is awaited inline. A background-queued sink can wrap `JSONLSink` later if needed. Keeps the failure model simple — back-pressure shows up as awaitable latency at the call site.
 
 ### Plan
-_(deferred)_
+
+#### Architecture
+
+```mermaid
+graph LR
+    disp["Dispatcher.dispatch()"] -->|emit| tel["Telemetry.emit()"]
+    orch["Orchestrator.run()"] -->|emit| tel
+    tel -->|fan-out| ms["MultiSink"]
+    ms --> n["NullSink"]
+    ms --> mem["MemorySink"]
+    ms --> jl["JSONLSink<br/>(file / stream)"]
+    ms -.future.-> otel["OpenTelemetrySink<br/>([otel] extra)"]
+    style tel fill:#fef3c7
+```
+
+#### Files
+
+**New:**
+- `src/harness/telemetry/__init__.py` — re-exports
+- `src/harness/telemetry/events.py` — `TelemetryEvent`, `ToolDispatched`, `OrchestratorTurn`
+- `src/harness/telemetry/sinks.py` — `Sink` protocol, `NullSink`, `MemorySink`, `JSONLSink`, `MultiSink`
+- `src/harness/telemetry/recorder.py` — `Telemetry` (the central emit hub)
+- `tests/telemetry/__init__.py`
+- `tests/telemetry/test_sinks.py`
+- `tests/telemetry/test_integration.py` — exercises Dispatcher + Orchestrator wired to a `MemorySink`
+
+**Modified:**
+- `src/harness/tools/dispatcher.py` — accept `telemetry: Telemetry | None = None` kwarg; emit `ToolDispatched` at the end of each `dispatch()`.
+- `src/harness/agents/orchestrator.py` — same kwarg; emit `OrchestratorTurn` after `run()` completes (success or failure).
+- `src/harness/__init__.py` — add `Telemetry`, `MemorySink`, `JSONLSink` to top-level exports.
+- `README.md` — add a Telemetry row to the module table.
+- `progress.md` — status + impl log.
+
+#### Event types
+
+```python
+class TelemetryEvent(BaseModel):
+    event_id: UUID = Field(default_factory=uuid4)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    kind: str
+
+class ToolDispatched(TelemetryEvent):
+    kind: Literal["tool.dispatched"] = "tool.dispatched"
+    tool_name: str
+    call_id: str | None
+    arguments: dict[str, Any]
+    is_error: bool
+    duration_ms: float
+
+class OrchestratorTurn(TelemetryEvent):
+    kind: Literal["orchestrator.turn"] = "orchestrator.turn"
+    agent_name: str
+    duration_ms: float
+    error: str | None = None        # exception class + message if the runner raised
+```
+
+#### `Sink` protocol and concretions
+
+```python
+class Sink(Protocol):
+    async def emit(self, event: TelemetryEvent) -> None: ...
+
+class NullSink: ...        # no-op
+class MemorySink:
+    events: list[TelemetryEvent]
+    async def emit(self, event): self.events.append(event)
+
+class JSONLSink:
+    """Writes one JSON line per event to a file path or open text stream.
+
+    When backed by a path: opens in append mode per emit; `O_APPEND` makes
+    single writes atomic for typical event sizes, but a per-instance
+    `asyncio.Lock` around writes guards against torn lines under
+    `Orchestrator.run_parallel`. Sufficient for in-process concurrency;
+    cross-process locking is out of scope.
+    """
+    def __init__(self, target: TextIO | Path | str): ...
+    async def emit(self, event):
+        line = event.model_dump_json()
+        # if path: lock + open(append) + write(line+'\n') + flush + close.
+        # if stream: lock + write(line+'\n') + flush.
+
+class MultiSink:
+    def __init__(self, *sinks: Sink): ...
+    async def emit(self, event):
+        for s in self._sinks:
+            try: await s.emit(event)
+            except Exception: logger.warning(...)
+```
+
+#### `Telemetry` recorder
+
+```python
+class Telemetry:
+    def __init__(self, sink: Sink | None = None) -> None:
+        self._sink: Sink = sink if sink is not None else NullSink()
+
+    async def emit(self, event: TelemetryEvent) -> None:
+        try:
+            await self._sink.emit(event)
+        except Exception:
+            logger.warning("telemetry sink %r failed", self._sink, exc_info=True)
+```
+
+#### Wire-in
+
+The existing `Dispatcher.dispatch()` body is factored into a private `_dispatch_inner(call)` coroutine; the public `dispatch()` becomes a thin timing-and-emit wrapper. Argument dicts are passed through `json.loads(json.dumps(..., default=str))` at event-construction time so a `Path` or other non-JSON-native value never crashes a `JSONLSink`. Documented as a field invariant on `ToolDispatched.arguments`.
+
+```python
+# Dispatcher.dispatch()
+start = time.perf_counter()
+result = await self._dispatch_inner(call)
+duration_ms = (time.perf_counter() - start) * 1000
+if self._telemetry is not None:
+    await self._telemetry.emit(ToolDispatched(
+        tool_name=call.name,
+        call_id=call.id,
+        arguments=_jsonify(call.arguments),       # coerce to JSON-safe dict
+        is_error=result.is_error,
+        duration_ms=duration_ms,
+    ))
+return result
+
+# Orchestrator.run()
+start = time.perf_counter()
+err: str | None = None
+try:
+    return await self._runner(agent, messages)
+except Exception as exc:
+    err = f"{type(exc).__name__}: {exc}"
+    raise
+finally:
+    duration_ms = (time.perf_counter() - start) * 1000
+    if self._telemetry is not None:
+        await self._telemetry.emit(OrchestratorTurn(
+            agent_name=agent.name, duration_ms=duration_ms, error=err,
+        ))
+```
+
+#### Tests
+
+`tests/telemetry/test_sinks.py`:
+1. `MemorySink` collects events in emit order.
+2. `JSONLSink` to a `StringIO` writes one valid JSON line per event; trailing newline; flushed.
+3. `JSONLSink` to a `Path` opens in append mode (so a second `emit` doesn't truncate).
+4. `MultiSink` fans out to every sink; one failing sink does not stop the others.
+5. `Telemetry` swallows sink exceptions.
+6. `NullSink` returns `None`.
+
+`tests/telemetry/test_integration.py`:
+1. `Dispatcher(..., telemetry=t)` emits `ToolDispatched` per `dispatch()` with correct `tool_name`, `is_error`, and a positive `duration_ms`.
+2. `Dispatcher(..., telemetry=None)` emits nothing (sanity check that the default truly is silent).
+3. `Orchestrator(..., telemetry=t)` emits `OrchestratorTurn` after a successful `run()`.
+4. `Orchestrator(..., telemetry=t)` emits `OrchestratorTurn` with `error` populated when the runner raises (and re-raises the exception).
+5. `Orchestrator.run_parallel(...)` with a shared `MemorySink` emits N `OrchestratorTurn` events; with a shared `JSONLSink` writes N well-formed JSON lines (no torn lines).
+6. Non-JSON-native arguments (e.g. a `Path`) round-trip through `JSONLSink` without raising.
+
+#### Verification
+
+- `uv sync --extra dev --extra anthropic` — clean.
+- `uv run pytest` — green.
+- `uv run ruff check .` — clean.
+- `uv run mypy` — clean (strict).
+
+#### Out of scope (deferred)
+
+- OpenTelemetry sink (under a future `[otel]` extra).
+- `HookFired` events / instrumenting `HookRunner`.
+- `AnthropicRunner` directly emitting `api.request.*` events; the dispatcher path covers tool dispatch already.
+- Background-queue sinks; users can wrap `JSONLSink` if they need it.
 
 ### Implementation log
-_(deferred)_
+
+- **Plan reviewed by advisor.** Three blocking items addressed before code:
+  - Factored existing `Dispatcher.dispatch()` body into a private `_dispatch_inner()` so the public method is a clean timing-and-emit wrapper.
+  - Added `jsonify(value)` helper at `harness.telemetry.events` and applied it at `ToolDispatched` construction time so `Path` / dataclass / etc. arguments survive a JSONL sink (mirrors `_serialize_tool_content` instinct from item 1).
+  - Added a per-instance `asyncio.Lock` to `JSONLSink`, plus `MemorySink`, so concurrent writes from `run_parallel` cannot tear lines.
+- **Wire-in is opt-in.** Both `Dispatcher` and `Orchestrator` accept `telemetry: Telemetry | None = None` (kwarg-only). Default `None` → no events emitted, no overhead, fully backward-compatible. All existing tests still pass without modification.
+- **Failure isolation at two layers.** `MultiSink` catches per-sink exceptions and logs at WARNING; `Telemetry.emit` catches a final outer exception and logs the same way. A misbehaving sink can never crash a dispatch or orchestrator turn.
+- **Top-level re-exports.** `Telemetry`, `MemorySink`, `JSONLSink` available from `harness` directly. `Sink` / `NullSink` / `MultiSink` / `TelemetryEvent` / `OrchestratorTurn` / `ToolDispatched` accessible via `harness.telemetry`.
+- **Verification (final gates).**
+  - `uv sync --extra dev --extra anthropic` — clean.
+  - `uv run pytest` — 69 passed (was 54; +15 telemetry).
+  - `uv run ruff check .` — clean.
+  - `uv run mypy` — clean (strict, 22 source files).
+  - `uv run python examples/end_to_end.py` — still passes; the no-API smoke path is unaffected by the wire-in.
+- **Commit:** `feat(telemetry): pluggable sink protocol + dispatcher/orchestrator wire-in` (TBD on push).
 
 ---
 

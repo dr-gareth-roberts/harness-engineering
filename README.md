@@ -6,7 +6,7 @@ Opensource toolbox for harness engineering — utilities, primitives, and patter
 
 The "harness" is everything around the model: prompt assembly, tool wiring, permission gating, hook execution, sub-agent dispatch, memory, retries, sandboxing, telemetry. This repo aims to collect reusable building blocks for that layer — independent of any one CLI or vendor — so harness authors can compose rather than rebuild.
 
-The MVP ships six small, composable modules:
+The MVP ships seven small, composable modules:
 
 | Module             | What it gives you                                                       |
 | ------------------ | ----------------------------------------------------------------------- |
@@ -16,6 +16,7 @@ The MVP ships six small, composable modules:
 | `harness.policy`   | `AllowList` / `DenyList` / `ArgumentMatcher` policies for tool calls    |
 | `harness.agents`   | `SubAgent` + `Orchestrator` that emits lifecycle hooks (model-agnostic) |
 | `harness.runner`   | `AnthropicRunner` — a real Anthropic SDK runner that closes the tool loop (optional extra: `[anthropic]`) |
+| `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator |
 
 ## Install
 

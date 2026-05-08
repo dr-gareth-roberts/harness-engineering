@@ -6,6 +6,7 @@ from harness.agents import Orchestrator, SubAgent
 from harness.hooks import HookRunner
 from harness.policy import AllowList, DenyList
 from harness.prompts import Message
+from harness.telemetry import JSONLSink, MemorySink, Telemetry
 from harness.tools import Dispatcher, Tool
 
 if TYPE_CHECKING:
@@ -19,9 +20,12 @@ __all__ = [
     "DenyList",
     "Dispatcher",
     "HookRunner",
+    "JSONLSink",
+    "MemorySink",
     "Message",
     "Orchestrator",
     "SubAgent",
+    "Telemetry",
     "Tool",
     "__version__",
 ]
