@@ -14,6 +14,7 @@
 | 3 | Persistent memory / session storage    | shipped     | PR #1                                          |
 | 4 | Sandbox execution primitives           | shipped     | PR #1                                          |
 | 5 | Replay / eval harness                  | shipped     | PR #1                                          |
+| 6 | Vendor-neutralization (post-review)    | shipped     | PR #1                                          |
 
 ## Order rationale
 
@@ -1058,3 +1059,32 @@ A turn matches when the role + normalized form on both sides are equal. Mismatch
   - `uv run ruff check .` — clean.
   - `uv run mypy` — clean (strict, 32 source files).
 - **Commit:** `feat(replay): ReplayRunner + run_eval + compare_sessions` (TBD on push).
+
+---
+
+## Item 6 — Vendor neutralization (post-review)
+
+### Goal
+After the user flagged that the scaffold should not be Anthropic-specific, audit the surface and remove every implicit "this is a Claude library" signal. Add a second vendor runner so the runner package is visibly pluralistic out of the gate.
+
+### Status
+- Shipped.
+
+### Changes
+- **`SubAgent.model` is now required.** Default value removed; the docstring explains the field is a free-form string the runner interprets ("claude-opus-4-7" for `AnthropicRunner`, "gpt-5" for `OpenAICompatRunner`, "llama3.2" for an Ollama setup, etc.). All ~50 callsites in tests and examples updated to pass an explicit model — tests now use `"test-model"` as a vendor-neutral placeholder.
+- **`harness.runner.demo`** ships two no-dep runners: `EchoRunner(prefix?)` returns the last user text back as the assistant turn (with optional prefix); `CannedRunner(replies: list[str])` returns canned strings in order. Both satisfy the same `Runner` protocol as the vendor runners and are useful for tests, smoke checks, and tutorial code that should work without an API key.
+- **`harness.runner.openai_compat.OpenAICompatRunner`** lands under a new `[openai-compat]` extra (`openai>=1.40`). Mirrors `AnthropicRunner`'s shape: manual tool-use loop using the existing `Dispatcher`, fires `PreToolUse`/`PostToolUse` hooks around each dispatch, honours `HookDecision.block`, raises `RuntimeError` on unexpected `finish_reason`s. Translation helpers wrap our `Tool.json_schema()` in OpenAI's nested function-tool shape and split harness `Message`s into the role-based flat format OpenAI expects (system / user / assistant + tool_calls / tool result).
+- **Lazy imports preserve "no extra needed" for the base install.** `harness.runner.__init__` lazy-loads `AnthropicRunner` and `OpenAICompatRunner` via module `__getattr__` — `import harness` and `import harness.runner` both work without either extra installed; only direct submodule imports or top-level attribute access trigger the SDK requirement.
+- **README runner table.** New "Runners" section explicitly lists the protocol, the five shipped runners (`EchoRunner`, `CannedRunner`, `ReplayRunner`, `AnthropicRunner`, `OpenAICompatRunner`), and what's needed to add another vendor. Module-table row updated to mention all three external surfaces.
+
+### Tests
+- 6 new tests in `tests/runner/test_demo.py` covering `EchoRunner` text extraction, prefix handling, missing-user case, and `CannedRunner` order + exhaustion.
+- 11 new tests in `tests/runner/test_openai_compat.py` mirroring the AnthropicRunner test list: tool-translation shape, system message handling, no-tool happy path, one-iteration tool loop with `tool_call_id` propagation, hook-block short-circuit, max_iterations cap, unexpected `finish_reason` raises, allowed_tools filter, system_prompt prepending, missing-dep error.
+- `tests/runner/fakes_openai.py` mirrors `tests/runner/fakes.py` but for the OpenAI SDK shape (`Choice` / `ChatCompletionMessage` / `ChatCompletionMessageToolCall` lookalikes).
+
+### Verification
+- `uv sync --extra dev --extra anthropic --extra openai-compat` — clean.
+- `uv run pytest` — 151 passed (was 134; +6 demo, +11 openai_compat).
+- `uv run ruff check .` — clean.
+- `uv run mypy` — clean (strict, 34 source files).
+- `uv run python examples/end_to_end.py` — unchanged; no-API path still works.

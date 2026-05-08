@@ -18,7 +18,7 @@ def make_orchestrator(reply: str) -> Orchestrator:
 def make_record(messages: list[Message], session_id: str = "s") -> SessionRecord:
     return SessionRecord(
         session_id=session_id,
-        agent=SubAgent(name="x", system_prompt=""),
+        agent=SubAgent(name="x", system_prompt="", model="test-model"),
         messages=messages,
     )
 
@@ -33,7 +33,7 @@ async def test_run_eval_executes_each_case() -> None:
         EvalCase(name="probe", prompts=["status?"]),
     ]
     orch = make_orchestrator("ok")
-    agent = SubAgent(name="t", system_prompt="")
+    agent = SubAgent(name="t", system_prompt="", model="test-model")
 
     results = await run_eval(cases, orchestrator=orch, agent=agent)
 
@@ -51,7 +51,7 @@ async def test_run_eval_isolates_cases() -> None:
         EvalCase(name="b", prompts=["bye"]),
     ]
     orch = make_orchestrator("ok")
-    agent = SubAgent(name="t", system_prompt="")
+    agent = SubAgent(name="t", system_prompt="", model="test-model")
 
     results = await run_eval(cases, orchestrator=orch, agent=agent)
     a_msgs = [m.content[0].text for m in results[0].record.messages]

@@ -9,7 +9,7 @@ from harness.tools import ToolCall, ToolResult
 
 
 def make_agent() -> SubAgent:
-    return SubAgent(name="x", system_prompt="you are x")
+    return SubAgent(name="x", system_prompt="you are x", model="test-model")
 
 
 def test_round_trip_preserves_all_fields() -> None:

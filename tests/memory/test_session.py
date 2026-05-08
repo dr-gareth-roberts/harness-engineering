@@ -17,7 +17,7 @@ def make_orchestrator(reply_with: str = "ok") -> Orchestrator:
 
 
 def make_agent() -> SubAgent:
-    return SubAgent(name="bot", system_prompt="be helpful")
+    return SubAgent(name="bot", system_prompt="be helpful", model="test-model")
 
 
 async def test_send_accumulates_messages_and_saves() -> None:

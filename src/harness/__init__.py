@@ -8,26 +8,31 @@ from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
 from harness.policy import AllowList, DenyList
 from harness.prompts import Message
 from harness.replay import ReplayRunner, compare_sessions, run_eval
+from harness.runner import CannedRunner, EchoRunner
 from harness.sandbox import PathPolicy, PathScope, safe_subprocess_run, scrub_env
 from harness.telemetry import JSONLSink, MemorySink, Telemetry
 from harness.tools import Dispatcher, Tool
 
 if TYPE_CHECKING:
     from harness.runner.anthropic import AnthropicRunner
+    from harness.runner.openai_compat import OpenAICompatRunner
 
 __version__ = "0.0.1"
 
 __all__ = [
     "AllowList",
     "AnthropicRunner",
+    "CannedRunner",
     "DenyList",
     "Dispatcher",
+    "EchoRunner",
     "FileStore",
     "HookRunner",
     "InMemoryStore",
     "JSONLSink",
     "MemorySink",
     "Message",
+    "OpenAICompatRunner",
     "Orchestrator",
     "PathPolicy",
     "PathScope",
@@ -50,4 +55,8 @@ def __getattr__(name: str) -> Any:
         from harness.runner import AnthropicRunner
 
         return AnthropicRunner
+    if name == "OpenAICompatRunner":
+        from harness.runner import OpenAICompatRunner
+
+        return OpenAICompatRunner
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -23,7 +23,7 @@ async def test_run_emits_lifecycle_hooks_and_returns_runner_output() -> None:
         return text("assistant", f"hi {agent.name}")
 
     orch, seen = make_orchestrator(fake_runner)
-    agent = SubAgent(name="bot", system_prompt="be helpful")
+    agent = SubAgent(name="bot", system_prompt="be helpful", model="test-model")
 
     result = await orch.run(agent, [text("user", "hello")])
     assert result.role == "assistant"
@@ -36,7 +36,7 @@ async def test_session_end_fires_even_when_runner_raises() -> None:
         raise RuntimeError("explode")
 
     orch, seen = make_orchestrator(boom)
-    agent = SubAgent(name="bot", system_prompt="x")
+    agent = SubAgent(name="bot", system_prompt="x", model="test-model")
 
     with contextlib.suppress(RuntimeError):
         await orch.run(agent, [])
@@ -51,7 +51,7 @@ async def test_run_parallel_actually_runs_concurrently() -> None:
         return text("assistant", agent.name)
 
     orch, _ = make_orchestrator(slow)
-    jobs = [(SubAgent(name=f"a{i}", system_prompt=""), []) for i in range(4)]
+    jobs = [(SubAgent(name=f"a{i}", system_prompt="", model="test-model"), []) for i in range(4)]
 
     start = time.perf_counter()
     results = await orch.run_parallel(jobs)

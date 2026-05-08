@@ -53,6 +53,7 @@ def _agent(*, allowed_tools: list[str] | None = None) -> SubAgent:
     return SubAgent(
         name="t",
         system_prompt="You are a small test agent.",
+        model="claude-opus-4-7",
         allowed_tools=allowed_tools if allowed_tools is not None else ["echo"],
     )
 

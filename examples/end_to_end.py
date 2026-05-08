@@ -96,6 +96,7 @@ async def main() -> int:
     agent = SubAgent(
         name="demo",
         system_prompt="Demonstrate every harness module in one turn.",
+        model="demo-model",  # vendor-neutral; the fake runner ignores it
         allowed_tools=["echo"],
     )
 

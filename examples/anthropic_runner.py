@@ -72,6 +72,7 @@ async def main() -> int:
             "you to echo a word, call the `echo` tool with that exact word, then "
             "summarise what you did in one short sentence."
         ),
+        model="claude-opus-4-7",
         allowed_tools=["echo"],
     )
 

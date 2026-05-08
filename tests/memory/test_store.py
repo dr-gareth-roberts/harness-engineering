@@ -18,7 +18,7 @@ StoreFactory = Callable[[], Awaitable[MemoryStore]]
 def make_record(session_id: str, **overrides: Any) -> SessionRecord:
     base: dict[str, Any] = {
         "session_id": session_id,
-        "agent": SubAgent(name="x", system_prompt="hi"),
+        "agent": SubAgent(name="x", system_prompt="hi", model="test-model"),
         "messages": [text("user", "hello")],
     }
     base.update(overrides)

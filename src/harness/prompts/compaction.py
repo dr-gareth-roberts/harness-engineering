@@ -14,6 +14,7 @@ _DEFAULT_SUMMARIZER = SubAgent(
         "context. Capture decisions, file paths, identifiers, and unresolved questions. "
         "Drop pleasantries. Output a single paragraph, no preamble, under 300 words."
     ),
+    model="<set-by-runner>",
     allowed_tools=[],
 )
 

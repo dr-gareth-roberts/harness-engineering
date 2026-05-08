@@ -84,7 +84,10 @@ async def test_orchestrator_emits_turn_on_success() -> None:
         fake_runner,
         telemetry=Telemetry(sink),
     )
-    await orch.run(SubAgent(name="alpha", system_prompt=""), [text("user", "hi")])
+    await orch.run(
+        SubAgent(name="alpha", system_prompt="", model="test-model"),
+        [text("user", "hi")],
+    )
 
     assert len(sink.events) == 1
     e = sink.events[0]
@@ -108,7 +111,7 @@ async def test_orchestrator_emits_turn_on_failure() -> None:
     )
 
     with pytest.raises(RuntimeError, match="explode"):
-        await orch.run(SubAgent(name="bot", system_prompt=""), [])
+        await orch.run(SubAgent(name="bot", system_prompt="", model="test-model"), [])
 
     assert len(sink.events) == 1
     e = sink.events[0]
@@ -134,7 +137,7 @@ async def test_run_parallel_emits_one_event_per_turn() -> None:
         fake_runner,
         telemetry=Telemetry(sink),
     )
-    jobs = [(SubAgent(name=f"a{i}", system_prompt=""), []) for i in range(4)]
+    jobs = [(SubAgent(name=f"a{i}", system_prompt="", model="test-model"), []) for i in range(4)]
     results = await orch.run_parallel(jobs)
 
     assert [r.content[0].text for r in results] == ["a0", "a1", "a2", "a3"]
@@ -156,7 +159,7 @@ async def test_jsonl_sink_under_run_parallel_writes_clean_lines(tmp_path: Path) 
         fake_runner,
         telemetry=Telemetry(sink),
     )
-    jobs = [(SubAgent(name=f"a{i}", system_prompt=""), []) for i in range(8)]
+    jobs = [(SubAgent(name=f"a{i}", system_prompt="", model="test-model"), []) for i in range(8)]
     await orch.run_parallel(jobs)
 
     lines = target.read_text(encoding="utf-8").splitlines()

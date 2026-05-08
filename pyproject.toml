@@ -19,6 +19,7 @@ dev = [
   "mypy>=1.10",
 ]
 anthropic = ["anthropic>=0.60"]
+openai-compat = ["openai>=1.40"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/harness"]

@@ -15,7 +15,7 @@ The MVP ships seven small, composable modules:
 | `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit   |
 | `harness.policy`   | `AllowList` / `DenyList` / `ArgumentMatcher` policies for tool calls    |
 | `harness.agents`   | `SubAgent` + `Orchestrator` that emits lifecycle hooks (model-agnostic) |
-| `harness.runner`   | `AnthropicRunner` — a real Anthropic SDK runner that closes the tool loop (optional extra: `[anthropic]`) |
+| `harness.runner`   | Pluggable runners satisfying the `Runner` protocol: `EchoRunner` / `CannedRunner` (no deps), `AnthropicRunner` (extra `[anthropic]`), `OpenAICompatRunner` for OpenAI / vLLM / Ollama / llama.cpp / LM Studio (extra `[openai-compat]`) |
 | `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator |
 | `harness.memory`   | `SessionRecord`, `MemoryStore` protocol, `InMemoryStore` / `FileStore`, plus a `Session` helper that snapshots after every turn |
 | `harness.sandbox`  | `PathScope` + `PathPolicy` for filesystem-scoped tool calls, `safe_subprocess_run` with scrubbed env and timeout |
@@ -57,11 +57,31 @@ A runnable script that wires all four base modules together lives at
 uv run python examples/end_to_end.py
 ```
 
-For a real Anthropic-API loop with prompt caching and the tool dispatcher,
-install the extra and run:
+## Runners
+
+The `Orchestrator` is model-agnostic — it takes any callable matching the
+`Runner` protocol:
+
+```python
+Runner = Callable[[SubAgent, list[Message]], Awaitable[Message]]
+```
+
+The package ships several:
+
+| Runner               | Install                                           | Use it for |
+| -------------------- | ------------------------------------------------- | ----------- |
+| `EchoRunner`         | base install                                      | smoke tests, examples — echoes the last user message back |
+| `CannedRunner`       | base install                                      | unit tests — returns canned strings in order |
+| `ReplayRunner`       | base install                                      | replaying captured `SessionRecord`s deterministically |
+| `AnthropicRunner`    | `uv sync --extra anthropic`                       | Claude via the Anthropic SDK |
+| `OpenAICompatRunner` | `uv sync --extra openai-compat`                   | OpenAI, plus any OpenAI-compatible server: vLLM, llama.cpp, Ollama, LM Studio, Together, Groq |
+
+Adding another vendor is mechanical: create `harness/runner/<vendor>.py`
+with a class satisfying the protocol, register it in `harness/runner/__init__.py`,
+add an optional extra to `pyproject.toml`. Nothing in `harness.agents`,
+`harness.tools`, etc. needs to change.
 
 ```bash
-uv sync --extra anthropic
 ANTHROPIC_API_KEY=sk-ant-... uv run python examples/anthropic_runner.py
 ```
 
