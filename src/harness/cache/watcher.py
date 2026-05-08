@@ -35,9 +35,12 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from harness.cache.store import FingerprintRecord, FingerprintStore
+
+if TYPE_CHECKING:
+    from harness.cache.audit import DriftReport
 
 FullCapture = Literal["always", "on_drift", "never"]
 
@@ -244,6 +247,20 @@ class PrefixWatcher:
             )
             await self._store.append(record)
             self._last_seen[index] = (digest, canonical)
+
+    async def audit(self, *, window_hours: float = 24.0) -> DriftReport:
+        """Convenience wrapper for `harness.cache.audit(self._store, ...)`.
+
+        The free function in `harness.cache.audit` is the canonical entry
+        point; this method exists so the doc-style API
+        `await watcher.audit(window_hours=24)` reads the way the design
+        sketch does. Both call sites read the same store.
+        """
+        # Imported lazily to keep watcher importable without audit's
+        # heavier deps (difflib, regex hint table) in cold paths.
+        from harness.cache.audit import audit as _audit
+
+        return await _audit(self._store, window_hours=window_hours)
 
     def _decide_full_prompt(self, breakpoint_index: int, digest: str, canonical: str) -> str | None:
         if self._full_capture == "always":

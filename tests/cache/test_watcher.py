@@ -242,6 +242,20 @@ async def test_integration_with_fake_anthropic_runner_surfaces_drift() -> None:
     assert any(e.hint and "timestamp" in e.hint for e in drift_on_zero)
 
 
+async def test_watcher_audit_convenience_method_calls_through_to_audit() -> None:
+    """`watcher.audit(window_hours=24)` is sugar for the free
+    `audit(store, window_hours=24)` — both should produce the same report."""
+    store = InMemoryFingerprintStore()
+    watcher = PrefixWatcher(store, full_capture="on_drift")
+    await watcher.fingerprint(_anthropic_request(system="a"))
+    await watcher.fingerprint(_anthropic_request(system="b"))
+
+    via_method = await watcher.audit(window_hours=24)
+    via_function = await audit(store, window_hours=24)
+
+    assert len(via_method.drift_events) == len(via_function.drift_events) == 1
+
+
 async def test_openai_compat_request_hashes_as_single_segment() -> None:
     """OpenAI-compatible requests have no `cache_control` markers — the
     watcher should still produce one fingerprint (best-effort prefix
