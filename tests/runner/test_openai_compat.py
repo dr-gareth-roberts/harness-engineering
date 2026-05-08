@@ -485,3 +485,164 @@ async def test_running_history_grows_per_iteration_oai() -> None:
     # + user(tool_result).
     assert spec.begin_calls[0]["history_len"] == 1
     assert spec.begin_calls[1]["history_len"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Wave 10 #6: per-iteration timeout
+
+
+async def test_oa_runner_timeout_raises_when_create_takes_too_long() -> None:
+    """timeout_s wraps chat.completions.create in asyncio.wait_for. A fake
+    that sleeps longer than the timeout raises TimeoutError."""
+    response = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="ok"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response], create_delay=0.2)
+    dispatcher, _ = _echo_dispatcher()
+
+    runner = OpenAICompatRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        timeout_s=0.05,
+    )
+
+    with pytest.raises(TimeoutError):
+        await runner(_agent(), [text("user", "hi")])
+
+
+async def test_oa_runner_no_timeout_completes_normally_with_slow_call() -> None:
+    response = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="ok"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response], create_delay=0.05)
+    dispatcher, _ = _echo_dispatcher()
+
+    runner = OpenAICompatRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    result = await runner(_agent(), [text("user", "hi")])
+    assert isinstance(result, Message)
+
+
+# ---------------------------------------------------------------------------
+# Wave 10 #5: HookDecision.replacement (OpenAICompat parity)
+
+
+async def test_oa_pre_tool_use_replacement_skips_dispatch() -> None:
+    from harness.hooks.events import HookDecision
+
+    tool_call = FakeOAToolCall(
+        id="tc_1",
+        function=FakeOAFunction(name="echo", arguments='{"text": "hi"}'),
+    )
+    response_1 = FakeOAResponse(
+        choices=[
+            FakeOAChoice(
+                message=FakeOAMessage(content=None, tool_calls=[tool_call]),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    response_2 = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="done"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response_1, response_2])
+    dispatcher, dispatch_log = _echo_dispatcher()
+
+    hooks = HookRunner()
+    hooks.register(
+        PreToolUse,
+        lambda e: HookDecision(replacement=ToolResult(content="injected", is_error=False)),
+    )
+
+    runner = OpenAICompatRunner(dispatcher, hooks, client=client)  # type: ignore[arg-type]
+    await runner(_agent(), [text("user", "echo hi")])
+
+    assert dispatch_log == []
+    second = client.chat.completions.requests[1]
+    tool_result_msg = next(m for m in second["messages"] if m.get("role") == "tool")
+    assert tool_result_msg["tool_call_id"] == "tc_1"
+    assert tool_result_msg["content"] == "injected"
+
+
+# ---------------------------------------------------------------------------
+# Wave 10 #3: speculator observe + cancel_unobserved on OpenAICompat
+
+
+async def test_oa_runner_calls_observe_for_each_tool_call_in_response() -> None:
+    """OpenAICompat parity with AnthropicRunner Wave 6: each emitted
+    tool_call surfaces to speculator.observe() before dispatch begins."""
+    tc1 = FakeOAToolCall(
+        id="tc_1",
+        function=FakeOAFunction(name="echo", arguments='{"text": "first"}'),
+    )
+    tc2 = FakeOAToolCall(
+        id="tc_2",
+        function=FakeOAFunction(name="echo", arguments='{"text": "second"}'),
+    )
+    response_1 = FakeOAResponse(
+        choices=[
+            FakeOAChoice(
+                message=FakeOAMessage(content=None, tool_calls=[tc1, tc2]),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    response_2 = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="ok"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response_1, response_2])
+    dispatcher, _ = _echo_dispatcher()
+    spec = _StubSpeculator()
+
+    runner = OpenAICompatRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    await runner(_agent(), [text("user", "echo")])
+
+    # observe fired twice in iteration 1 (one per tool_call), zero in
+    # iteration 2 (text-only response).
+    assert [c.id for c in spec.observe_calls] == ["tc_1", "tc_2"]
+    # cancel_unobserved fires once per iteration that had any tool_calls
+    # — and once per iteration regardless if speculator was active.
+    # Pre-Wave-10 #3, this would be 0; now it's 2 (once per iteration).
+    assert spec.cancel_unobserved_calls == 2
+
+
+async def test_oa_runner_with_speculator_none_does_not_observe() -> None:
+    """speculator=None path skips the observe loop cleanly."""
+    tc = FakeOAToolCall(
+        id="tc_1",
+        function=FakeOAFunction(name="echo", arguments='{"text": "hi"}'),
+    )
+    response_1 = FakeOAResponse(
+        choices=[
+            FakeOAChoice(
+                message=FakeOAMessage(content=None, tool_calls=[tc]),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    response_2 = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="done"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response_1, response_2])
+    dispatcher, dispatch_log = _echo_dispatcher()
+
+    runner = OpenAICompatRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        # speculator=None
+    )
+    result = await runner(_agent(), [text("user", "echo hi")])
+
+    assert dispatch_log == ["hi"]
+    assert isinstance(result, Message)

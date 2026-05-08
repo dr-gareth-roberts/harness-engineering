@@ -9,8 +9,13 @@ when a local `base_url` is supplied — local servers usually don't check
 it).
 
 Caveats (mirroring `AnthropicRunner`):
-- `HookDecision.replacement` is ignored; only `block` is honoured.
+- `HookDecision` honors `block` (short-circuit to is_error result) and
+  `replacement` (PreToolUse: skip dispatch, use supplied result;
+  PostToolUse: rewrite the dispatched result before sending back).
 - Stop reasons other than `stop`/`length`/`tool_calls` raise `RuntimeError`.
+  OpenAI's `content_filter` is not currently surfaced as an event;
+  callers will see it as `RuntimeError` until parity with the
+  AnthropicRunner pause_turn/refusal events ships.
 - `cache_control` markers from `harness.prompts` have no effect — the
   OpenAI Chat Completions API has no equivalent (caching is server-side
   / opaque on most providers).
@@ -20,6 +25,7 @@ Caveats (mirroring `AnthropicRunner`):
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -182,6 +188,7 @@ class OpenAICompatRunner:
         max_iterations: int = 10,
         prefix_watcher: PrefixWatcherProtocol | None = None,
         speculator: SpeculatorProtocol | None = None,
+        timeout_s: float | None = None,
     ) -> None:
         self.dispatcher = dispatcher
         self.hooks = hooks
@@ -201,6 +208,11 @@ class OpenAICompatRunner:
         self._max_iterations = max_iterations
         self._prefix_watcher = prefix_watcher
         self._speculator = speculator
+        # Per-iteration timeout. None = no timeout (default; matches the
+        # SDK's own behavior). When set, the chat-completions create call
+        # is wrapped in `asyncio.wait_for`. Retry/backoff is intentionally
+        # deferred (Wave 10 — see docs/plan.md).
+        self._timeout_s = timeout_s
 
     def _build_request(
         self,
@@ -250,13 +262,42 @@ class OpenAICompatRunner:
                 )
 
             try:
-                response = await self._client.chat.completions.create(**request)
+                create_call = self._client.chat.completions.create(**request)
+                if self._timeout_s is not None:
+                    response = await asyncio.wait_for(create_call, timeout=self._timeout_s)
+                else:
+                    response = await create_call
                 choice = response.choices[0]
                 finish_reason = choice.finish_reason
 
                 assistant_message = _translate_out(choice.message)
                 running_history.append(assistant_message)
                 await self.hooks.emit(PostAssistantMessage(message=assistant_message))
+
+                tool_calls = list(choice.message.tool_calls or [])
+
+                # Speculator surface (Wave 10 #3): observe each emitted
+                # tool_call BEFORE the early-return for stop/length so a
+                # text-only response still triggers cancel_unobserved on
+                # whatever specs were launched. Mirrors AnthropicRunner
+                # Wave 6 cancellation timing — observe before dispatch,
+                # cancel before dispatch (and before the early return).
+                if self._speculator is not None:
+                    for tc in tool_calls:
+                        if tc.type != "function":
+                            continue
+                        try:
+                            obs_args = json.loads(tc.function.arguments)
+                        except ValueError:
+                            obs_args = {}
+                        await self._speculator.observe(
+                            ToolCall(
+                                name=tc.function.name,
+                                arguments=obs_args,
+                                id=tc.id,
+                            )
+                        )
+                    await self._speculator.cancel_unobserved()
 
                 if finish_reason in ("stop", "length"):
                     return assistant_message
@@ -272,7 +313,6 @@ class OpenAICompatRunner:
                     "role": "assistant",
                     "content": choice.message.content or "",
                 }
-                tool_calls = list(choice.message.tool_calls or [])
                 if tool_calls:
                     assistant_entry["tool_calls"] = [
                         {
@@ -310,17 +350,48 @@ class OpenAICompatRunner:
                     if speculative_result is not None:
                         result = speculative_result
                     else:
-                        decisions = await self.hooks.emit(PreToolUse(call=call))
-                        blocked = next((d for d in decisions if d.block), None)
+                        pre_decisions = await self.hooks.emit(PreToolUse(call=call))
+                        # PreToolUse hook decisions: `block` short-circuits
+                        # to an is_error result; `replacement=ToolResult(...)`
+                        # short-circuits dispatch with the supplied result
+                        # (id patched to the model's call id). First match wins.
+                        blocked = next((d for d in pre_decisions if d.block), None)
+                        replaced = next(
+                            (d for d in pre_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
                         if blocked is not None:
                             result = ToolResult(
                                 id=tc.id,
                                 content=blocked.reason or "blocked by hook",
                                 is_error=True,
                             )
+                        elif replaced is not None:
+                            assert isinstance(replaced.replacement, ToolResult)
+                            result = ToolResult(
+                                id=tc.id,
+                                content=replaced.replacement.content,
+                                is_error=replaced.replacement.is_error,
+                            )
                         else:
                             result = await self.dispatcher.dispatch(call)
-                        await self.hooks.emit(PostToolUse(call=call, result=result))
+
+                        post_decisions = await self.hooks.emit(
+                            PostToolUse(call=call, result=result)
+                        )
+                        # PostToolUse can rewrite the result before it goes
+                        # back to the model — typical use is sanitization.
+                        post_replacement = next(
+                            (d for d in post_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
+                        if post_replacement is not None:
+                            assert isinstance(post_replacement.replacement, ToolResult)
+                            result = ToolResult(
+                                id=tc.id,
+                                content=post_replacement.replacement.content,
+                                is_error=post_replacement.replacement.is_error,
+                            )
 
                     tool_result_entries.append(
                         {
