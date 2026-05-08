@@ -21,6 +21,11 @@ in the repo root. This page summarizes the current state.
 10 of 10 standout features from the original `designs/standout.md`
 are shipped. Tests: 495+; mypy strict clean across 82 source files.
 
+The forward plan from `0.2.0` to a defensible `1.0` lives at
+[Path to 1.0](plan.md) — five waves, ~13–15 developer-days, each
+gap from the Wave 8 audit assigned to a wave with an approach +
+acceptance criteria.
+
 ## Deferred
 
 These are intentional gaps, not omissions:

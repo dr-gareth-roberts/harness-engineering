@@ -80,6 +80,7 @@ nav:
       - debug: modules/debug.md
       - speculate: modules/speculate.md
   - Roadmap: roadmap.md
+  - Path to 1.0: plan.md
 
 markdown_extensions:
   - admonition
