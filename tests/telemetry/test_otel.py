@@ -46,7 +46,7 @@ def otel_pipeline() -> Iterator[tuple[otel_trace.Tracer, InMemorySpanExporter]]:
         provider.shutdown()
         # `set_tracer_provider` warns on second call; assigning back via the
         # private API keeps tests isolated without polluting OTel logs.
-        otel_trace._TRACER_PROVIDER = previous_provider  # type: ignore[attr-defined]
+        otel_trace._TRACER_PROVIDER = previous_provider
 
 
 def make_tool_event(name: str = "echo") -> ToolDispatched:
@@ -195,7 +195,7 @@ async def test_satisfies_sink_protocol_via_multisink(
 
     [span] = exporter.get_finished_spans()
     assert [e.name for e in span.events] == ["tool.dispatched"]
-    assert [e.tool_name for e in memory.events] == ["multi"]
+    assert [e.tool_name for e in memory.events if isinstance(e, ToolDispatched)] == ["multi"]
 
 
 # -----------------------------------------------------------------------------

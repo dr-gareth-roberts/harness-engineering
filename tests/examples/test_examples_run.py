@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -44,7 +45,7 @@ EXAMPLES: list[tuple[str, str]] = [
 ]
 
 
-def _load_example(name: str):
+def _load_example(name: str) -> Any:
     """Import an examples/*.py module by its file name (no extension)."""
     examples_dir = Path(__file__).resolve().parents[2] / "examples"
     spec = importlib.util.spec_from_file_location(f"_example_{name}", examples_dir / f"{name}.py")

@@ -13,8 +13,12 @@ Plus a few targeted lower-level checks that lock in detector semantics
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Literal
+
 from harness.privacy.detectors import (
     Detection,
+    Detector,
     EntropyDetector,
     RegexDetector,
 )
@@ -109,7 +113,11 @@ def test_entropy_detector_default_action_is_audit() -> None:
 # Pre-built packs
 
 
-def _scan_with_pack(pack: list, text: str, direction: str = "outbound") -> list[Detection]:
+def _scan_with_pack(
+    pack: Sequence[Detector],
+    text: str,
+    direction: Literal["outbound", "inbound"] = "outbound",
+) -> list[Detection]:
     """Run an ordered pack of detectors against `text` and merge detections."""
     flat: list[Detection] = []
     for det in pack:

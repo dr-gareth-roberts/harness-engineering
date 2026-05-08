@@ -43,7 +43,8 @@ def file_factory(tmp_path: Path) -> StoreFactory:
 
 @pytest.fixture(params=["in_memory", "file"])
 def store_factory(request: pytest.FixtureRequest) -> StoreFactory:
-    return request.getfixturevalue(f"{request.param}_factory")
+    factory: StoreFactory = request.getfixturevalue(f"{request.param}_factory")
+    return factory
 
 
 # ---------------------------------------------------------------------------

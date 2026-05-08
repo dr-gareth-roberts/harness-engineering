@@ -13,8 +13,8 @@ from harness.tools import Dispatcher
 def make_orchestrator(runner) -> tuple[Orchestrator, list[type]]:  # type: ignore[no-untyped-def]
     seen: list[type] = []
     hooks = HookRunner()
-    hooks.register(SessionStart, lambda e: seen.append(type(e)))  # type: ignore[func-returns-value]
-    hooks.register(SessionEnd, lambda e: seen.append(type(e)))  # type: ignore[func-returns-value]
+    hooks.register(SessionStart, lambda e: seen.append(type(e)))
+    hooks.register(SessionEnd, lambda e: seen.append(type(e)))
     return Orchestrator(Dispatcher(), hooks, runner), seen
 
 
@@ -51,7 +51,9 @@ async def test_run_parallel_actually_runs_concurrently() -> None:
         return text("assistant", agent.name)
 
     orch, _ = make_orchestrator(slow)
-    jobs = [(SubAgent(name=f"a{i}", system_prompt="", model="test-model"), []) for i in range(4)]
+    jobs: list[tuple[SubAgent, list[Message]]] = [
+        (SubAgent(name=f"a{i}", system_prompt="", model="test-model"), []) for i in range(4)
+    ]
 
     start = time.perf_counter()
     results = await orch.run_parallel(jobs)

@@ -372,7 +372,11 @@ async def test_jsonl_sink_emit_works_as_audit_sink(tmp_path: Path) -> None:
     path = tmp_path / "privacy.jsonl"
     boundary = PrivacyBoundary(
         detectors=[RegexDetector("us_ssn", r"\b\d{3}-\d{2}-\d{4}\b", action="redact")],
-        audit_sink=JSONLSink(path).emit,
+        # JSONLSink.emit accepts any TelemetryEvent; PrivacyBoundary's
+        # audit_sink is typed for the narrower DetectionEvent. Callable
+        # arg-types are contravariant — the broader signature is
+        # behaviorally fine, but mypy can't see that without a wrapper.
+        audit_sink=JSONLSink(path).emit,  # type: ignore[arg-type]
     )
     wrapped = boundary.wrap(RecordingRunner())
     await wrapped(make_agent(), [text("user", "ssn 123-45-6789 here")])

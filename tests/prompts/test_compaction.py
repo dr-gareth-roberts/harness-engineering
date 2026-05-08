@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from harness.agents import SubAgent
 from harness.prompts import Message, compact, summarize_compact, text
 
@@ -75,7 +77,7 @@ async def test_summarize_compact_inserts_summary_and_keeps_tail() -> None:
 
 async def test_summarize_compact_skips_runner_when_under_keep_last() -> None:
     messages = [text("user", str(i)) for i in range(3)]
-    runner_calls: list[Any] = []  # noqa: F821 - using object
+    runner_calls: list[tuple[Any, Any]] = []
 
     async def fake_runner(agent: SubAgent, msgs: list[Message]) -> Message:  # pragma: no cover
         runner_calls.append((agent, msgs))

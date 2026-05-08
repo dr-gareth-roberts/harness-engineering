@@ -25,7 +25,8 @@ def make_event(name: str = "echo") -> ToolDispatched:
 
 
 async def test_null_sink_returns_none() -> None:
-    assert await NullSink().emit(make_event()) is None
+    # `emit` returns None by signature; awaiting it is a smoke check.
+    await NullSink().emit(make_event())
 
 
 async def test_memory_sink_collects_in_order() -> None:
@@ -33,7 +34,15 @@ async def test_memory_sink_collects_in_order() -> None:
     events = [make_event(f"t{i}") for i in range(3)]
     for e in events:
         await sink.emit(e)
-    assert [e.tool_name for e in sink.events] == ["t0", "t1", "t2"]
+    # MemorySink.events is `list[TelemetryEvent]` — the abstract base
+    # has no `tool_name` attribute. Narrow to the concrete type the
+    # test created.
+    assert all(isinstance(e, ToolDispatched) for e in sink.events)
+    assert [e.tool_name for e in sink.events if isinstance(e, ToolDispatched)] == [
+        "t0",
+        "t1",
+        "t2",
+    ]
 
 
 async def test_jsonl_sink_to_stream_writes_one_line_per_event() -> None:
@@ -92,7 +101,7 @@ async def test_telemetry_swallows_sink_exceptions() -> None:
 async def test_telemetry_default_is_null_sink() -> None:
     t = Telemetry()
     # Smoke: emit returns None and does not error.
-    assert await t.emit(make_event()) is None
+    await t.emit(make_event())
 
 
 async def test_jsonify_handles_non_native_arguments() -> None:

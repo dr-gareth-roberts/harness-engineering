@@ -181,8 +181,8 @@ async def test_max_iterations_cap_raises() -> None:
     runner = AnthropicRunner(
         dispatcher,
         HookRunner(),
-        client=client,
-        max_iterations=3,  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
+        max_iterations=3,
     )
 
     with pytest.raises(RuntimeError, match="max_iterations=3"):
@@ -235,8 +235,8 @@ async def test_thinking_omitted_when_disabled() -> None:
     runner = AnthropicRunner(
         dispatcher,
         HookRunner(),
-        client=client,
-        thinking_mode="disabled",  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
+        thinking_mode="disabled",
     )
 
     await runner(_agent(), [text("user", "x")])
@@ -417,10 +417,10 @@ async def test_speculator_hit_skips_runner_dispatch_and_hooks() -> None:
     pre_calls: list[ToolCall] = []
     post_calls: list[tuple[ToolCall, ToolResult]] = []
     hooks = HookRunner()
-    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call) or None)
+    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call))
     hooks.register(
         PostToolUse,
-        lambda e: post_calls.append((e.call, e.result)) or None,
+        lambda e: post_calls.append((e.call, e.result)),
     )
 
     runner = AnthropicRunner(
@@ -463,10 +463,10 @@ async def test_speculator_miss_falls_back_to_runner_hooks_and_dispatch() -> None
     pre_calls: list[ToolCall] = []
     post_calls: list[tuple[ToolCall, ToolResult]] = []
     hooks = HookRunner()
-    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call) or None)
+    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call))
     hooks.register(
         PostToolUse,
-        lambda e: post_calls.append((e.call, e.result)) or None,
+        lambda e: post_calls.append((e.call, e.result)),
     )
 
     runner = AnthropicRunner(

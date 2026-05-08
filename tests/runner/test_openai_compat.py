@@ -211,8 +211,8 @@ async def test_max_iterations_cap_raises() -> None:
     runner = OpenAICompatRunner(
         dispatcher,
         HookRunner(),
-        client=client,
-        max_iterations=3,  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
+        max_iterations=3,
     )
 
     with pytest.raises(RuntimeError, match="max_iterations=3"):
@@ -362,10 +362,10 @@ async def test_speculator_hit_skips_runner_dispatch_and_hooks_oai() -> None:
     pre_calls: list[ToolCall] = []
     post_calls: list[tuple[ToolCall, ToolResult]] = []
     hooks = HookRunner()
-    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call) or None)
+    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call))
     hooks.register(
         PostToolUse,
-        lambda e: post_calls.append((e.call, e.result)) or None,
+        lambda e: post_calls.append((e.call, e.result)),
     )
 
     runner = OpenAICompatRunner(
@@ -410,7 +410,7 @@ async def test_speculator_miss_falls_back_to_runner_hooks_and_dispatch_oai() -> 
 
     pre_calls: list[ToolCall] = []
     hooks = HookRunner()
-    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call) or None)
+    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call))
 
     runner = OpenAICompatRunner(
         dispatcher,

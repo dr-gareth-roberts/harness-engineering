@@ -299,7 +299,7 @@ async def test_speculative_dispatch_fires_pre_and_post_tool_hooks() -> None:
     dispatcher = _dispatcher(idempotent=["search"])
     seen_pre: list[ToolCall] = []
     hooks = HookRunner()
-    hooks.register(PreToolUse, lambda e: seen_pre.append(e.call) or None)
+    hooks.register(PreToolUse, lambda e: seen_pre.append(e.call))
 
     speculator = Speculator(LastCallPredictor(history_window=1), max_speculations=1)
     await speculator.begin(
@@ -461,7 +461,7 @@ def test_predictor_protocol_accepts_external_strategy() -> None:
         ) -> list[ToolCall]:
             return []
 
-    p: Predictor = MyPredictor()  # type: ignore[assignment]
+    p: Predictor = MyPredictor()
     assert p.predict([], {}, 1) == []
 
 

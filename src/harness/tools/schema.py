@@ -5,7 +5,16 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-ToolHandler = Callable[[BaseModel], Awaitable[Any] | Any]
+# The handler signature uses `Any` for the input parameter rather than
+# `BaseModel` because Python's `Callable` is contravariant in its
+# arguments — a function `(args: MySpecificModel) -> str` is NOT
+# assignable to `Callable[[BaseModel], ...]` even though every
+# `MySpecificModel` IS a `BaseModel`. Tool authors write handlers that
+# expect their specific input model; `Any` lets them do that without a
+# `# type: ignore` at every call site. The actual input validation
+# still happens at runtime via `input_model.model_validate(...)` in
+# the dispatcher, so the type-laxity matches the runtime guarantee.
+ToolHandler = Callable[[Any], Awaitable[Any] | Any]
 
 
 class Tool(BaseModel):
