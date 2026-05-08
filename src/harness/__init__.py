@@ -7,6 +7,7 @@ from harness.hooks import HookRunner
 from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
 from harness.policy import AllowList, DenyList
 from harness.prompts import Message
+from harness.sandbox import PathPolicy, PathScope, safe_subprocess_run, scrub_env
 from harness.telemetry import JSONLSink, MemorySink, Telemetry
 from harness.tools import Dispatcher, Tool
 
@@ -27,12 +28,16 @@ __all__ = [
     "MemorySink",
     "Message",
     "Orchestrator",
+    "PathPolicy",
+    "PathScope",
     "Session",
     "SessionRecord",
     "SubAgent",
     "Telemetry",
     "Tool",
     "__version__",
+    "safe_subprocess_run",
+    "scrub_env",
 ]
 
 

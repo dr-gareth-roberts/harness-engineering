@@ -12,7 +12,7 @@
 | 1 | Real model runner + summarization-compaction | shipped | PR #1                                          |
 | 2 | Telemetry / structured event stream    | shipped     | PR #1                                          |
 | 3 | Persistent memory / session storage    | shipped     | PR #1                                          |
-| 4 | Sandbox execution primitives           | pending     | TBD                                            |
+| 4 | Sandbox execution primitives           | shipped     | PR #1                                          |
 | 5 | Replay / eval harness                  | pending     | TBD                                            |
 
 ## Order rationale
@@ -729,22 +729,232 @@ class Session:
 ## Item 4 — Sandbox execution primitives
 
 ### Goal
-Extend `harness.policy` with execution-side guards: filesystem path scoping
-(allow/deny prefixes), a subprocess wrapper that respects policies and scrubs
-the environment, and a network-deny-by-default helper. The aim is composable
-primitives, not a full sandbox engine.
+Extend `harness.policy` with execution-side guards. Three primitives:
+1. `PathScope` + `PathPolicy` — filesystem path scoping (allow/deny prefixes,
+   symlink-resolved) that integrates with the existing hook stack.
+2. `safe_subprocess_run` — async subprocess helper with a scrubbed environment
+   and a hard wall-clock timeout.
+3. `scrub_env` — filter `os.environ` (or a supplied base) to a small allowlist.
+
+Non-goal: a real sandbox. We do not run untrusted code; we provide composable
+primitives that help users build sandboxed *tools* on top of the existing
+policy/dispatcher stack. Real isolation (seccomp, namespaces, microVMs) is the
+caller's responsibility.
 
 ### Status
-- Pending.
+- Shipped.
 
 ### Decisions
-_(deferred)_
+- **Composable primitives, not a sandbox engine.** Each primitive does one
+  small thing, takes plain values, and slots into the existing
+  `Policy = Callable[[PreToolUse], HookDecision | None]` shape where
+  applicable. No new event types; no new module-level integration with
+  `Dispatcher` or `Orchestrator`.
+- **Symlink-resolved scoping, advisory only.** `PathScope.is_allowed(p)`
+  resolves both the argument and the configured prefixes via
+  `Path.resolve(strict=False)` before doing prefix containment checks. This
+  catches `../escape` and symlink escapes the user might try by accident.
+  It does NOT defeat a TOCTOU attacker — between `is_allowed()` returning
+  True and the tool opening the path, a concurrent symlink swap can
+  redirect the operation. Documented in the class docstring: "advisory,
+  not enforced — use OS-level isolation if you need real safety."
+- **Empty allow-list means unrestricted.** Mirrors the conventional firewall
+  default: `allow_prefixes = ()` ⇒ everything is allowed, `deny_prefixes`
+  is still consulted. To deny by default, pass an empty allow-list of
+  one path that doesn't exist (or use `deny_prefixes=("/",)` explicitly).
+  Documented in the docstring.
+- **`safe_subprocess_run` is sync-call-friendly via asyncio.** Built on
+  `asyncio.create_subprocess_exec`. Wall-clock timeout via `asyncio.wait_for`
+  + kill on timeout. No shell — `cmd` is a `Sequence[str]`, no `shell=True`.
+  Returns `SubprocessResult(returncode, stdout, stderr, duration_ms)`.
+- **`scrub_env` defaults to a tight allowlist.** `{PATH, HOME, TMPDIR, TMP,
+  TEMP, LANG, LC_ALL}`. Anything else has to be passed through `extra`. This
+  is intentionally conservative so a leaked `ANTHROPIC_API_KEY` /
+  `AWS_SECRET_ACCESS_KEY` / etc. does not flow into a child process by
+  default.
+- **Network "deny by default" is best-effort.** We don't intercept syscalls.
+  We reduce the *attack surface* by stripping HTTP_PROXY / HTTPS_PROXY env
+  vars from the default scrub allowlist. Real network policy needs the OS
+  (firewall rules, network namespaces). Documented.
+- **File names.** `paths.py`, `process.py` — not `subprocess.py`, to avoid
+  shadowing the stdlib name in tooling that does string-match imports.
 
 ### Plan
-_(deferred)_
+
+#### Architecture
+
+```mermaid
+graph LR
+    subgraph harness.sandbox
+        scope["PathScope"] -->|adapts| pol["PathPolicy"]
+        scope -->|validate()| paths["validate_path / is_allowed"]
+        env["scrub_env()"]
+        proc["safe_subprocess_run"] -->|defaults to| env
+    end
+    pol -.attaches as.-> hooks["HookRunner.PreToolUse"]
+    style pol fill:#fef3c7
+```
+
+#### Files
+
+**New:**
+- `src/harness/sandbox/__init__.py` — re-exports
+- `src/harness/sandbox/paths.py` — `PathScope`, `PathPolicy`, `PathDenied`
+- `src/harness/sandbox/process.py` — `safe_subprocess_run`, `scrub_env`,
+  `SubprocessResult`, `SubprocessTimeout`, `DEFAULT_ALLOWED_ENV_KEYS`
+- `tests/sandbox/__init__.py`
+- `tests/sandbox/test_paths.py`
+- `tests/sandbox/test_process.py`
+
+**Modified:**
+- `src/harness/__init__.py` — re-export `PathScope` and `safe_subprocess_run`
+- `README.md` — module-table row
+- `progress.md` — status + log
+
+#### `PathScope` and `PathPolicy`
+
+```python
+class PathDenied(ValueError): ...
+
+@dataclass(frozen=True)
+class PathScope:
+    allow_prefixes: tuple[Path, ...] = ()
+    deny_prefixes: tuple[Path, ...] = ()
+
+    @classmethod
+    def of(cls, *, allow=(), deny=()) -> PathScope:
+        return cls(
+            allow_prefixes=tuple(Path(p).resolve() for p in allow),
+            deny_prefixes=tuple(Path(p).resolve() for p in deny),
+        )
+
+    def is_allowed(self, path: str | Path) -> bool:
+        try:
+            resolved = Path(path).resolve(strict=False)
+        except (OSError, RuntimeError):
+            return False
+        if any(_is_within(resolved, d) for d in self.deny_prefixes):
+            return False
+        if not self.allow_prefixes:
+            return True
+        return any(_is_within(resolved, a) for a in self.allow_prefixes)
+
+    def validate(self, path: str | Path) -> Path:
+        resolved = Path(path).resolve(strict=False)
+        if not self.is_allowed(resolved):
+            raise PathDenied(f"path {resolved} is outside the allowed scope")
+        return resolved
+
+
+@dataclass(frozen=True)
+class PathPolicy:
+    """harness.policy.Policy that blocks tool calls whose `path`-shaped
+    arguments fall outside the scope."""
+    scope: PathScope
+    tool_names: frozenset[str]
+    arg_keys: tuple[str, ...] = ("path",)
+
+    def __call__(self, event: PreToolUse) -> HookDecision | None: ...
+```
+
+#### `safe_subprocess_run` and `scrub_env`
+
+```python
+DEFAULT_ALLOWED_ENV_KEYS = frozenset({
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
+})
+
+def scrub_env(
+    base: Mapping[str, str] | None = None,
+    *,
+    allow_keys: Iterable[str] = DEFAULT_ALLOWED_ENV_KEYS,
+    extra: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Filter `base` (defaults to os.environ) down to `allow_keys`,
+    then merge `extra`. `extra` overrides `base`."""
+
+class SubprocessTimeout(TimeoutError): ...
+
+@dataclass(frozen=True)
+class SubprocessResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    duration_ms: float
+
+async def safe_subprocess_run(
+    cmd: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+    cwd: str | Path | None = None,
+    timeout: float = 30.0,
+    stdin: bytes | None = None,
+    text_decode: str = "utf-8",
+) -> SubprocessResult:
+    """Run `cmd` with no shell, a scrubbed env (default), and a wall-clock
+    timeout. Kills the child on timeout and raises SubprocessTimeout."""
+```
+
+#### Tests
+
+`tests/sandbox/test_paths.py`:
+1. `is_allowed` happy path: allow ["/a"], path "/a/b" → True.
+2. Path outside allow-list is rejected.
+3. Deny-list takes precedence over allow-list.
+4. Empty allow-list ⇒ everything is allowed (only deny is consulted).
+5. Symlink escape: a symlink inside the allowed prefix that points outside
+   resolves outside, so `is_allowed` returns False.
+6. `..` traversal: `/a/b/../../etc/passwd` resolves outside `/a` and is
+   rejected.
+7. `validate` returns a resolved `Path` on success and raises `PathDenied`
+   on failure.
+8. `PathPolicy` returns `HookDecision(block=True, ...)` for an out-of-scope
+   path argument and `None` otherwise.
+9. `PathPolicy.tool_names` filter: a call to a non-listed tool is ignored.
+10. `PathPolicy.arg_keys` filter: keys not present in the call are skipped.
+
+`tests/sandbox/test_process.py`:
+All Python invocations use `sys.executable` so the tests survive on systems where `python` isn't on PATH (`python3`-only Linux distros, fresh containers). Timeout behavior is documented as POSIX-tested only — the kill+wait pattern is reliable on Linux/macOS but not exhaustively verified on Windows event-loop variants.
+
+1. `scrub_env` keeps only allow-listed keys, merges `extra`, and `extra` wins over `base`.
+2. `scrub_env(base={"FOO": "bar"})` does not touch `os.environ`.
+3. `safe_subprocess_run([sys.executable, "-c", "print('hi')"])` → returncode 0, stdout `"hi\n"`.
+4. Timeout: `safe_subprocess_run([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.2)` raises `SubprocessTimeout` and the call returns within ~1 s.
+5. Env scrubbing: a subprocess that prints `os.environ.get("ANTHROPIC_API_KEY", "<unset>")` under the default scrubbed env returns `"<unset>"`.
+6. `extra` env passes through: a subprocess that prints `os.environ.get("X")` with `extra={"X": "y"}` returns `"y"`.
+7. `cwd`: a subprocess that prints `os.getcwd()` matches the configured `cwd`.
+8. Non-zero exit: `[sys.executable, "-c", "import sys; sys.exit(7)"]` returns `returncode == 7`, no exception raised.
+
+#### Verification
+
+- `uv sync --extra dev --extra anthropic` — clean.
+- `uv run pytest` — green.
+- `uv run ruff check .` — clean.
+- `uv run mypy` — clean (strict).
+
+#### Out of scope (deferred)
+
+- OS-level isolation (seccomp, namespaces, cgroups, microVMs).
+- Network policy enforcement at the syscall level.
+- A `safe_open(path, scope, mode)` helper — `PathScope.validate()` is the
+  building block; users compose.
+- Per-process resource limits (`resource.setrlimit`).
 
 ### Implementation log
-_(deferred)_
+
+- **Plan reviewed by advisor.** Three concrete fixes addressed before code:
+  - Documented TOCTOU caveat: `PathScope` is advisory; between `is_allowed()` returning True and the caller opening the path, a concurrent symlink swap can redirect. Use OS-level isolation if real safety matters.
+  - Tests use `sys.executable` (not the bare string `"python"`) so they survive on `python3`-only Linux distros and other CI variants.
+  - Documented POSIX-only verification of the timeout path; Windows event-loop variants are not exhaustively tested.
+- **`scrub_env` default contract is the load-bearing safety bit.** The default allow-list excludes `ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, `OPENAI_API_KEY`, etc. Test `test_scrub_env_default_set_excludes_secrets` is a pure assertion against `DEFAULT_ALLOWED_ENV_KEYS` so a future contributor can't accidentally widen the default.
+- **`safe_subprocess_run` integration test** ran `monkeypatch.setenv("ANTHROPIC_API_KEY", "should-not-leak")` and verified the child sees `<unset>`. The contract is exercised end-to-end, not just at the helper level.
+- **Top-level re-exports.** `PathScope`, `PathPolicy`, `safe_subprocess_run`, `scrub_env` available from `harness` directly.
+- **Verification (final gates).**
+  - `uv sync --extra dev --extra anthropic` — clean.
+  - `uv run pytest` — 121 passed (was 96; +25 sandbox).
+  - `uv run ruff check .` — clean.
+  - `uv run mypy` — clean (strict, 29 source files).
+- **Commit:** `feat(sandbox): PathScope/PathPolicy + safe_subprocess_run + scrub_env` (TBD on push).
 
 ---
 

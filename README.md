@@ -18,6 +18,7 @@ The MVP ships seven small, composable modules:
 | `harness.runner`   | `AnthropicRunner` — a real Anthropic SDK runner that closes the tool loop (optional extra: `[anthropic]`) |
 | `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator |
 | `harness.memory`   | `SessionRecord`, `MemoryStore` protocol, `InMemoryStore` / `FileStore`, plus a `Session` helper that snapshots after every turn |
+| `harness.sandbox`  | `PathScope` + `PathPolicy` for filesystem-scoped tool calls, `safe_subprocess_run` with scrubbed env and timeout |
 
 ## Install
 
