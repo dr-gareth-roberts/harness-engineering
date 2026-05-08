@@ -9,4 +9,4 @@ class SubAgent(BaseModel):
     name: str
     system_prompt: str
     allowed_tools: list[str] = []
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-opus-4-7"

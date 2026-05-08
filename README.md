@@ -6,15 +6,16 @@ Opensource toolbox for harness engineering — utilities, primitives, and patter
 
 The "harness" is everything around the model: prompt assembly, tool wiring, permission gating, hook execution, sub-agent dispatch, memory, retries, sandboxing, telemetry. This repo aims to collect reusable building blocks for that layer — independent of any one CLI or vendor — so harness authors can compose rather than rebuild.
 
-The MVP ships five small, composable modules:
+The MVP ships six small, composable modules:
 
 | Module             | What it gives you                                                       |
 | ------------------ | ----------------------------------------------------------------------- |
 | `harness.tools`    | Pydantic-backed `Tool` + async `Dispatcher` with validation             |
-| `harness.prompts`  | `Message` / `ContentBlock`, file attachment, simple compaction          |
+| `harness.prompts`  | `Message` / `ContentBlock`, file attachment, last-N compaction, summarization-based compaction |
 | `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit   |
 | `harness.policy`   | `AllowList` / `DenyList` / `ArgumentMatcher` policies for tool calls    |
 | `harness.agents`   | `SubAgent` + `Orchestrator` that emits lifecycle hooks (model-agnostic) |
+| `harness.runner`   | `AnthropicRunner` — a real Anthropic SDK runner that closes the tool loop (optional extra: `[anthropic]`) |
 
 ## Install
 
@@ -45,11 +46,19 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-A runnable script that wires all four modules together lives at
+A runnable script that wires all four base modules together lives at
 [`examples/end_to_end.py`](examples/end_to_end.py):
 
 ```bash
 uv run python examples/end_to_end.py
+```
+
+For a real Anthropic-API loop with prompt caching and the tool dispatcher,
+install the extra and run:
+
+```bash
+uv sync --extra anthropic
+ANTHROPIC_API_KEY=sk-ant-... uv run python examples/anthropic_runner.py
 ```
 
 ## Development
@@ -64,13 +73,13 @@ uv run mypy          # type-check (strict)
 
 Out of scope for the MVP (PRs welcome):
 
-- Real model API calls (today the `Orchestrator` takes an injected `runner`).
 - Persistent memory / session storage.
 - Telemetry / OpenTelemetry export.
 - Sandbox primitives (filesystem, network, subprocess) — `harness.policy` ships
   the tool-call layer; sandbox execution is later.
 - Replay / eval harness.
-- Summarization-based compaction.
+- Additional model runners (OpenAI, etc.) — the `harness.runner` package
+  leaves room.
 
 ## License
 

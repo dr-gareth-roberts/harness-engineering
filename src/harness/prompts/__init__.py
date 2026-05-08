@@ -1,4 +1,4 @@
-from harness.prompts.compaction import compact
+from harness.prompts.compaction import compact, summarize_compact
 from harness.prompts.files import attach_file
 from harness.prompts.messages import (
     ContentBlock,
@@ -14,6 +14,7 @@ __all__ = [
     "assistant_tool_use",
     "attach_file",
     "compact",
+    "summarize_compact",
     "text",
     "user_tool_result",
 ]

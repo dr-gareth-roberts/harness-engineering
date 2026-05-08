@@ -9,7 +9,7 @@
 | # | Item                                   | Status      | Branch / PR                                    |
 | - | -------------------------------------- | ----------- | ---------------------------------------------- |
 | 0 | MVP scaffold (tools/prompts/hooks/agents/policy) | shipped | PR #1 (`chore/initial-scaffold` → `main`)      |
-| 1 | Real model runner + summarization-compaction | planning | TBD                                            |
+| 1 | Real model runner + summarization-compaction | shipped | PR #1                                          |
 | 2 | Telemetry / structured event stream    | pending     | TBD                                            |
 | 3 | Persistent memory / session storage    | pending     | TBD                                            |
 | 4 | Sandbox execution primitives           | pending     | TBD                                            |
@@ -57,7 +57,7 @@ Anthropic SDK, handles a complete tool-use loop using the existing
 summarization-based compaction strategy that uses the runner for its summary call.
 
 ### Status
-- Plan written. Awaiting review.
+- Shipped. PR #1 commits `87…` (TBD on push) — see Implementation log.
 
 ### Decisions
 - **Vendor namespace.** Anthropic-specific code lives in `harness.runner.anthropic`. The base package keeps zero non-Pydantic deps; `anthropic` is an optional extra (`pip install harness-engineering[anthropic]`). Other vendors can land alongside (`harness.runner.openai`, etc.) without churn.
@@ -251,7 +251,23 @@ Same gates as the MVP, plus the example:
 - A non-Anthropic runner. Module structure leaves room.
 
 ### Implementation log
-_(populated as work progresses — newest at the bottom)_
+
+- **Plan reviewed by advisor.** Three blocking items addressed before code:
+  - Fixed `dispatcher.tools_schema()` usage in the loop sketch (avoiding `_tools` private access).
+  - Bumped declared anthropic floor from `>=0.39` to `>=0.60`. Verified empirically by installing into a scratch dir: `0.100.0` resolves with `output_config` and `thinking` present in the type system.
+  - Switched the missing-dep test to `monkeypatch.setitem(sys.modules, "anthropic", None)` + `importlib.reload`, so it runs deterministically in CI regardless of whether the extra is installed.
+- **Default model spillover.** `SubAgent.model` default changed from `claude-sonnet-4-6` to `claude-opus-4-7`. Rippled through `tests/agents/test_orchestrator.py` and `examples/end_to_end.py` (both construct `SubAgent` without `model`) — no behavioural change because the fake runners don't read it.
+- **Lazy import on the package root.** `from harness import AnthropicRunner` works only when `[anthropic]` is installed; `import harness` always works. Implemented via module `__getattr__` on both `harness` and `harness.runner`.
+- **Translation rules implemented as documented.** System messages flatten to the top-level `system` parameter; `cache=True` propagates as `cache_control: {"type": "ephemeral"}`; tool result content is `json.dumps`-serialized for dicts/lists, `str()` otherwise; file blocks render as `<file path=...>\n...\n</file>` text.
+- **Hook block path.** When a `PreToolUse` hook returns `block=True`, the dispatcher is skipped entirely and the API gets a `tool_result` with `is_error=True` and the block reason. `PostToolUse` still fires (with the synthesized error result) so audit hooks see every attempted call.
+- **Verification (final gates).**
+  - `uv sync --extra dev --extra anthropic` — clean.
+  - `uv run pytest` — 54 passed (was 38; +13 runner, +3 summarize_compact).
+  - `uv run ruff check .` — clean.
+  - `uv run mypy` — clean (strict, 18 source files).
+  - `uv run python examples/end_to_end.py` — exits 0; the no-API smoke path still works after the default-model change.
+  - `examples/anthropic_runner.py` — wired up; gated on `ANTHROPIC_API_KEY`. Not run in CI; would need a real key to smoke-test.
+- **Commit:** `feat(runner): add AnthropicRunner + summarization-based compaction` (TBD on push).
 
 ---
 
