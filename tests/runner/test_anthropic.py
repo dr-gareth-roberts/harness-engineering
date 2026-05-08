@@ -8,7 +8,7 @@ import pytest
 from pydantic import BaseModel
 
 from harness.agents import SubAgent
-from harness.hooks import HookRunner
+from harness.hooks import HookRunner, PostToolUse, PreToolUse
 from harness.policy import AllowList, attach_pre_tool_policies
 from harness.prompts import Message, attach_file, text
 from harness.runner.anthropic import (
@@ -17,6 +17,7 @@ from harness.runner.anthropic import (
     _translate_in,
 )
 from harness.tools import Dispatcher, Tool
+from harness.tools.schema import ToolCall, ToolResult
 from tests.runner.fakes import (
     FakeAsyncAnthropic,
     FakeMessage,
@@ -328,3 +329,206 @@ async def test_runner_emits_post_assistant_message_on_each_loop_iteration() -> N
     assert iter2_text == "echoed: hi"
     # Intermediate message also carried the tool_use block.
     assert any(b.type == "tool_use" for b in seen[0].content)
+
+
+# ---------------------------------------------------------------------------
+# Speculator wiring (Wave 3 Phase 1)
+
+
+class _StubSpeculator:
+    """Test stub satisfying SpeculatorProtocol.
+
+    Records every call. Configurable per-call hit/miss via the `hits`
+    dict (call.name -> ToolResult) so tests can pin both branches.
+    """
+
+    def __init__(self, hits: dict[str, ToolResult] | None = None) -> None:
+        self.hits = dict(hits or {})
+        self.begin_calls: list[dict[str, object]] = []
+        self.try_resolve_calls: list[ToolCall] = []
+        self.end_calls = 0
+
+    async def begin(
+        self,
+        *,
+        history: list[Message],
+        agent: SubAgent,
+        dispatcher: Dispatcher,
+        hooks: HookRunner,
+    ) -> None:
+        self.begin_calls.append(
+            {"history_len": len(history), "agent_name": agent.name}
+        )
+
+    async def try_resolve(self, call: ToolCall) -> ToolResult | None:
+        self.try_resolve_calls.append(call)
+        return self.hits.get(call.name)
+
+    async def end(self) -> None:
+        self.end_calls += 1
+
+
+async def test_speculator_begin_and_end_fire_per_iteration() -> None:
+    response = FakeMessage(
+        content=[FakeTextBlock(text="hi")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+    spec = _StubSpeculator()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    await runner(_agent(), [text("user", "hello")])
+
+    # One iteration → one begin/end pair.
+    assert len(spec.begin_calls) == 1
+    assert spec.end_calls == 1
+    # No tool_use blocks → try_resolve never consulted.
+    assert spec.try_resolve_calls == []
+
+
+async def test_speculator_hit_skips_runner_dispatch_and_hooks() -> None:
+    """A try_resolve hit means the speculator already fired PreToolUse /
+    dispatch / PostToolUse around its own dispatch. The runner must not
+    repeat any of that for this call."""
+    tool_use = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "hi"})
+    response_1 = FakeMessage(content=[tool_use], stop_reason="tool_use")
+    response_2 = FakeMessage(
+        content=[FakeTextBlock(text="done")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, dispatch_log = _echo_dispatcher()
+
+    cached = ToolResult(id="tu_1", content="(from speculation)", is_error=False)
+    spec = _StubSpeculator(hits={"echo": cached})
+
+    pre_calls: list[ToolCall] = []
+    post_calls: list[tuple[ToolCall, ToolResult]] = []
+    hooks = HookRunner()
+    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call) or None)
+    hooks.register(
+        PostToolUse,
+        lambda e: post_calls.append((e.call, e.result)) or None,
+    )
+
+    runner = AnthropicRunner(
+        dispatcher,
+        hooks,
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    await runner(_agent(), [text("user", "echo hi")])
+
+    # Speculator was consulted with the model's call.
+    assert len(spec.try_resolve_calls) == 1
+    assert spec.try_resolve_calls[0].name == "echo"
+
+    # Runner did NOT fire its own hooks for the speculatively-resolved call.
+    assert pre_calls == []
+    assert post_calls == []
+
+    # And it did NOT touch the dispatcher itself.
+    assert dispatch_log == []
+
+    # Two iterations → two begin/end pairs.
+    assert len(spec.begin_calls) == 2
+    assert spec.end_calls == 2
+
+
+async def test_speculator_miss_falls_back_to_runner_hooks_and_dispatch() -> None:
+    """When try_resolve returns None, the runner takes over: PreToolUse,
+    dispatch, PostToolUse — same as if no speculator were configured."""
+    tool_use = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "hi"})
+    response_1 = FakeMessage(content=[tool_use], stop_reason="tool_use")
+    response_2 = FakeMessage(
+        content=[FakeTextBlock(text="echoed: hi")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, dispatch_log = _echo_dispatcher()
+    spec = _StubSpeculator()  # no hits configured -> always miss
+
+    pre_calls: list[ToolCall] = []
+    post_calls: list[tuple[ToolCall, ToolResult]] = []
+    hooks = HookRunner()
+    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call) or None)
+    hooks.register(
+        PostToolUse,
+        lambda e: post_calls.append((e.call, e.result)) or None,
+    )
+
+    runner = AnthropicRunner(
+        dispatcher,
+        hooks,
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    result = await runner(_agent(), [text("user", "echo hi")])
+
+    # Try_resolve was consulted, returned None.
+    assert len(spec.try_resolve_calls) == 1
+
+    # Runner ran the full hook + dispatch cycle.
+    assert len(pre_calls) == 1
+    assert pre_calls[0].name == "echo"
+    assert len(post_calls) == 1
+    assert dispatch_log == ["hi"]  # echo handler logs the text it echoed
+
+    # End-to-end output unchanged from the no-speculator case.
+    assert result.content[0].text == "echoed: hi"
+
+
+async def test_speculator_end_fires_even_when_runner_raises() -> None:
+    """`begin` and `end` must be paired. If the SDK call (or anything else
+    in the iteration) raises, end still fires so the speculator can clean up
+    its background tasks."""
+    bad_response = FakeMessage(content=[], stop_reason="refusal")  # unhandled
+    client = FakeAsyncAnthropic(responses=[bad_response])
+    dispatcher, _ = _echo_dispatcher()
+    spec = _StubSpeculator()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    with pytest.raises(RuntimeError, match=r"Unexpected stop_reason"):
+        await runner(_agent(), [text("user", "hi")])
+
+    # begin fired, end fired even though the iteration aborted.
+    assert len(spec.begin_calls) == 1
+    assert spec.end_calls == 1
+
+
+async def test_running_history_passed_to_speculator_grows_per_iteration() -> None:
+    """`begin.history` must reflect the in-loop turns the caller never sees,
+    so the predictor can use them to pick its next speculation."""
+    tool_use = FakeToolUseBlock(id="tu_1", name="echo", input={"text": "hi"})
+    response_1 = FakeMessage(content=[tool_use], stop_reason="tool_use")
+    response_2 = FakeMessage(
+        content=[FakeTextBlock(text="echoed: hi")],
+        stop_reason="end_turn",
+    )
+    client = FakeAsyncAnthropic(responses=[response_1, response_2])
+    dispatcher, _ = _echo_dispatcher()
+    spec = _StubSpeculator()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    await runner(_agent(), [text("user", "echo hi")])
+
+    # Iteration 1 sees just the user input.
+    assert spec.begin_calls[0]["history_len"] == 1
+    # Iteration 2 sees user + assistant(tool_use) + user(tool_result).
+    assert spec.begin_calls[1]["history_len"] == 3
