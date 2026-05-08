@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "harness-engineering"
-version = "0.0.1"
+version = "0.2.0"
 description = "Opensource toolbox for harness engineering."
 readme = "README.md"
 license = "Apache-2.0"
