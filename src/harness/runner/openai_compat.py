@@ -35,7 +35,7 @@ from harness.agents.definition import SubAgent
 from harness.hooks.events import PostAssistantMessage, PostToolUse, PreToolUse
 from harness.hooks.runner import HookRunner
 from harness.prompts.messages import ContentBlock, Message, text
-from harness.runner.protocols import PrefixWatcherProtocol
+from harness.runner.protocols import PrefixWatcherProtocol, SpeculatorProtocol
 from harness.tools.dispatcher import Dispatcher
 from harness.tools.schema import ToolCall, ToolResult
 
@@ -181,7 +181,7 @@ class OpenAICompatRunner:
         max_tokens: int | None = 16_000,
         max_iterations: int = 10,
         prefix_watcher: PrefixWatcherProtocol | None = None,
-        speculator: object | None = None,
+        speculator: SpeculatorProtocol | None = None,
     ) -> None:
         self.dispatcher = dispatcher
         self.hooks = hooks
@@ -201,9 +201,6 @@ class OpenAICompatRunner:
         self._max_iterations = max_iterations
         self._prefix_watcher = prefix_watcher
         self._speculator = speculator
-        # `speculator` is reserved for the speculative-execution feature
-        # (`harness.speculate`); the runner accepts it now so adding the
-        # feature later doesn't require a constructor signature change.
 
     def _build_request(
         self,
@@ -232,78 +229,117 @@ class OpenAICompatRunner:
         api_messages = _translate_in(all_messages)
         request = self._build_request(agent, api_messages)
 
+        # Running history that grows with each iteration. The speculator's
+        # `begin` sees this so its predictions reflect in-loop turns the
+        # caller never sees (intermediate assistant tool_use messages, the
+        # synthesized tool_result message we feed back to the model, etc.).
+        # System prompt is intentionally excluded — predictors care about
+        # the user/assistant trajectory, not the agent's instructions.
+        running_history: list[Message] = list(messages)
+
         for _ in range(self._max_iterations):
             if self._prefix_watcher is not None:
                 await self._prefix_watcher.fingerprint(request)
-            response = await self._client.chat.completions.create(**request)
-            choice = response.choices[0]
-            finish_reason = choice.finish_reason
 
-            assistant_message = _translate_out(choice.message)
-            await self.hooks.emit(PostAssistantMessage(message=assistant_message))
-
-            if finish_reason in ("stop", "length"):
-                return assistant_message
-
-            if finish_reason != "tool_calls":
-                raise RuntimeError(
-                    f"Unexpected finish_reason from model: {finish_reason!r}. "
-                    "OpenAICompatRunner does not handle 'content_filter' or other "
-                    "reasons yet."
+            if self._speculator is not None:
+                await self._speculator.begin(
+                    history=running_history,
+                    agent=agent,
+                    dispatcher=self.dispatcher,
+                    hooks=self.hooks,
                 )
 
-            assistant_entry: dict[str, Any] = {
-                "role": "assistant",
-                "content": choice.message.content or "",
-            }
-            tool_calls = list(choice.message.tool_calls or [])
-            if tool_calls:
-                assistant_entry["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in tool_calls
-                ]
-            request["messages"] = [*request["messages"], assistant_entry]
+            try:
+                response = await self._client.chat.completions.create(**request)
+                choice = response.choices[0]
+                finish_reason = choice.finish_reason
 
-            tool_result_entries: list[dict[str, Any]] = []
-            for tc in tool_calls:
-                if tc.type != "function":
-                    continue
-                try:
-                    arguments = json.loads(tc.function.arguments)
-                except ValueError:
-                    arguments = {}
+                assistant_message = _translate_out(choice.message)
+                running_history.append(assistant_message)
+                await self.hooks.emit(PostAssistantMessage(message=assistant_message))
 
-                call = ToolCall(name=tc.function.name, arguments=arguments, id=tc.id)
+                if finish_reason in ("stop", "length"):
+                    return assistant_message
 
-                decisions = await self.hooks.emit(PreToolUse(call=call))
-                blocked = next((d for d in decisions if d.block), None)
-                if blocked is not None:
-                    result = ToolResult(
-                        id=tc.id,
-                        content=blocked.reason or "blocked by hook",
-                        is_error=True,
+                if finish_reason != "tool_calls":
+                    raise RuntimeError(
+                        f"Unexpected finish_reason from model: {finish_reason!r}. "
+                        "OpenAICompatRunner does not handle 'content_filter' or other "
+                        "reasons yet."
                     )
-                else:
-                    result = await self.dispatcher.dispatch(call)
 
-                await self.hooks.emit(PostToolUse(call=call, result=result))
+                assistant_entry: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": choice.message.content or "",
+                }
+                tool_calls = list(choice.message.tool_calls or [])
+                if tool_calls:
+                    assistant_entry["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in tool_calls
+                    ]
+                request["messages"] = [*request["messages"], assistant_entry]
 
-                tool_result_entries.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": _serialize_tool_content(result.content),
-                    }
-                )
+                tool_result_entries: list[dict[str, Any]] = []
+                synthesized_result_blocks: list[ContentBlock] = []
+                for tc in tool_calls:
+                    if tc.type != "function":
+                        continue
+                    try:
+                        arguments = json.loads(tc.function.arguments)
+                    except ValueError:
+                        arguments = {}
 
-            request["messages"] = [*request["messages"], *tool_result_entries]
+                    call = ToolCall(name=tc.function.name, arguments=arguments, id=tc.id)
+
+                    # Speculator's hit-check runs BEFORE the runner's own
+                    # hook + dispatch cycle. On hit, the speculator has
+                    # already fired PreToolUse/PostToolUse around its own
+                    # dispatch, so the runner skips both for this call.
+                    speculative_result: ToolResult | None = None
+                    if self._speculator is not None:
+                        speculative_result = await self._speculator.try_resolve(call)
+
+                    if speculative_result is not None:
+                        result = speculative_result
+                    else:
+                        decisions = await self.hooks.emit(PreToolUse(call=call))
+                        blocked = next((d for d in decisions if d.block), None)
+                        if blocked is not None:
+                            result = ToolResult(
+                                id=tc.id,
+                                content=blocked.reason or "blocked by hook",
+                                is_error=True,
+                            )
+                        else:
+                            result = await self.dispatcher.dispatch(call)
+                        await self.hooks.emit(PostToolUse(call=call, result=result))
+
+                    tool_result_entries.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": _serialize_tool_content(result.content),
+                        }
+                    )
+                    synthesized_result_blocks.append(
+                        ContentBlock(type="tool_result", tool_result=result)
+                    )
+
+                request["messages"] = [*request["messages"], *tool_result_entries]
+                # Mirror into running_history so the next iteration's
+                # speculator.begin sees the tool_results we just sent back.
+                running_history.append(Message(role="user", content=synthesized_result_blocks))
+            finally:
+                if self._speculator is not None:
+                    await self._speculator.end()
 
         raise RuntimeError(
             f"Tool-use loop exceeded max_iterations={self._max_iterations}. "
