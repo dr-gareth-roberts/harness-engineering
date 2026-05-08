@@ -43,9 +43,7 @@ def _echo_dispatcher() -> tuple[Dispatcher, list[str]]:
         return args.text
 
     return (
-        Dispatcher(
-            [Tool(name="echo", description="Echo back.", input_model=EchoIn, handler=echo)]
-        ),
+        Dispatcher([Tool(name="echo", description="Echo back.", input_model=EchoIn, handler=echo)]),
         log,
     )
 
@@ -64,9 +62,7 @@ def _agent(*, allowed_tools: list[str] | None = None) -> SubAgent:
 
 
 def test_translate_tools_wraps_in_function_shape() -> None:
-    schemas = [
-        {"name": "echo", "description": "echoes", "input_schema": {"type": "object"}}
-    ]
+    schemas = [{"name": "echo", "description": "echoes", "input_schema": {"type": "object"}}]
     out = _translate_tools(schemas)
     assert out == [
         {
@@ -212,7 +208,10 @@ async def test_max_iterations_cap_raises() -> None:
     client = FakeAsyncOpenAI(responses=responses)
     dispatcher, _ = _echo_dispatcher()
     runner = OpenAICompatRunner(
-        dispatcher, HookRunner(), client=client, max_iterations=3  # type: ignore[arg-type]
+        dispatcher,
+        HookRunner(),
+        client=client,
+        max_iterations=3,  # type: ignore[arg-type]
     )
 
     with pytest.raises(RuntimeError, match="max_iterations=3"):
@@ -238,9 +237,7 @@ async def test_unexpected_finish_reason_raises() -> None:
 
 async def test_allowed_tools_filter_excludes_unlisted_tools() -> None:
     response = FakeOAResponse(
-        choices=[
-            FakeOAChoice(message=FakeOAMessage(content="ok"), finish_reason="stop")
-        ]
+        choices=[FakeOAChoice(message=FakeOAMessage(content="ok"), finish_reason="stop")]
     )
     client = FakeAsyncOpenAI(responses=[response])
     dispatcher, _ = _echo_dispatcher()

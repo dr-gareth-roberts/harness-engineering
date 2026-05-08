@@ -6,20 +6,41 @@ Opensource toolbox for harness engineering — utilities, primitives, and patter
 
 The "harness" is everything around the model: prompt assembly, tool wiring, permission gating, hook execution, sub-agent dispatch, memory, retries, sandboxing, telemetry. This repo aims to collect reusable building blocks for that layer — independent of any one CLI or vendor — so harness authors can compose rather than rebuild.
 
-The MVP ships seven small, composable modules:
+### Core primitives
 
 | Module             | What it gives you                                                       |
 | ------------------ | ----------------------------------------------------------------------- |
 | `harness.tools`    | Pydantic-backed `Tool` + async `Dispatcher` with validation             |
 | `harness.prompts`  | `Message` / `ContentBlock`, file attachment, last-N compaction, summarization-based compaction |
-| `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit   |
+| `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit; events: `SessionStart` / `SessionEnd` / `PromptSubmit` / `PreToolUse` / `PostToolUse` / `PostAssistantMessage` / `Stop` |
 | `harness.policy`   | `AllowList` / `DenyList` / `ArgumentMatcher` policies for tool calls    |
 | `harness.agents`   | `SubAgent` + `Orchestrator` that emits lifecycle hooks (model-agnostic) |
-| `harness.runner`   | Pluggable runners satisfying the `Runner` protocol: `EchoRunner` / `CannedRunner` (no deps), `AnthropicRunner` (extra `[anthropic]`), `OpenAICompatRunner` for OpenAI / vLLM / Ollama / llama.cpp / LM Studio (extra `[openai-compat]`) |
+| `harness.runner`   | Pluggable runners satisfying the `Runner` protocol: `EchoRunner` / `CannedRunner` (no deps), `AnthropicRunner` (extra `[anthropic]`), `OpenAICompatRunner` for OpenAI / vLLM / Ollama / llama.cpp / LM Studio (extra `[openai-compat]`); structural `prefix_watcher` / `speculator` extension kwargs |
 | `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator |
 | `harness.memory`   | `SessionRecord`, `MemoryStore` protocol, `InMemoryStore` / `FileStore`, plus a `Session` helper that snapshots after every turn |
 | `harness.sandbox`  | `PathScope` + `PathPolicy` for filesystem-scoped tool calls, `safe_subprocess_run` with scrubbed env and timeout |
-| `harness.replay`   | `ReplayRunner` for deterministic playback, `run_eval` over a list of cases, `compare_sessions` that ignores tool-call IDs |
+| `harness.replay`   | `ReplayRunner` for deterministic playback, `run_eval`, `compare_sessions` (ignores tool-call IDs), `counterfactual` mutation + continuation, `diff_eval` cross-provider matrix |
+
+### Behavior & enforcement
+
+| Module             | What it gives you                                                       |
+| ------------------ | ----------------------------------------------------------------------- |
+| `harness.contracts`| Declarative invariants over agent trajectories; predicates (`HasToolUse` / `TextMatches` / `RoleIs` / `ArgMatches`) compose with `&` / `\|`, patterns (`Always` / `Eventually` / `Earlier(...).when(...)` / `Never`); shared DFA backs both `attach_contracts(hooks, ...)` runtime and offline `check(record, ...)`; three actions (`forbid` / `warn` / `require`) |
+| `harness.privacy`  | `PrivacyBoundary(detectors).wrap(real_runner)` returns a runner that scans every text fragment, tool_use argument, and tool_result content (recursively, depth-capped) for secrets / PII; `RegexDetector` + `EntropyDetector` with pre-built `SECRET_PACK` / `PII_PACK` / `HIPAA_PACK`; per-detector `direction` (`outbound` / `inbound` / `both`) and `action` (`redact` / `block` / `audit`); audit events never carry the matched value |
+| `harness.plan`     | `Plan` (Pydantic, JSON-serializable) of expected `PlannedToolCall`s; `PlanGuardedRunner(real_runner, plan, mode=...)` enforces it via the contracts DFA — deviation raises `PlanViolation`; `derive_plan()` helper to ask a planner agent to emit one |
+
+### Quality & exploration
+
+| Module             | What it gives you                                                       |
+| ------------------ | ----------------------------------------------------------------------- |
+| `harness.fuzz`     | Hypothesis-driven fuzzing (extra `[fuzz]`); `fuzz_tool` (drives Pydantic-typed inputs through `Dispatcher.dispatch`), `fuzz_agent` (drives them through a full `Orchestrator` turn), `harness_property` pytest decorator; lazy imports — module loads without the extra |
+| `harness.attribute`| Causal provenance via leave-one-out ablation; `attribute(session, target, runner, agent, granularity, similarity)` ranks input chunks by influence on a target output. `JaccardSimilarity` / `LengthRatio` zero-dep, `EmbeddingSimilarity` opt-in (extra `[attribute]`) |
+| `harness.cache`    | Prompt-prefix-drift watcher; `PrefixWatcher` satisfies the runner's structural `prefix_watcher=` protocol, fingerprints each cache breakpoint per request, `audit(store, window_hours)` surfaces silent invalidators with `unified_diff`; ships `harness cache-audit` CLI subcommand |
+| `harness.debug`    | `pdb`-flavored debugger for orchestrator runs; `DebugRunner(real_runner, ...)` wraps any runner, pauses on a configurable predicate, exposes a `DebugContext` for inspect / mutate / fire / resume / abort, programmatic and interactive REPL modes; ships `harness debug` CLI subcommand for offline replay debugging |
+
+### CLI
+
+`harness --help` lists the subcommands; new features register their own subparser via a `register(subparsers)` callable lazily discovered via `importlib.util.find_spec`. Currently shipped: `cache-audit`, `debug`.
 
 ## Install
 
@@ -95,15 +116,21 @@ uv run mypy          # type-check (strict)
 
 ## Roadmap
 
-Out of scope for the MVP (PRs welcome):
+Currently deferred (PRs welcome):
 
-- Persistent memory / session storage.
-- Telemetry / OpenTelemetry export.
-- Sandbox primitives (filesystem, network, subprocess) — `harness.policy` ships
-  the tool-call layer; sandbox execution is later.
-- Replay / eval harness.
-- Additional model runners (OpenAI, etc.) — the `harness.runner` package
-  leaves room.
+- **Speculative tool execution** — predict the next likely tool call from
+  recent trajectory and pre-execute it while the model is still generating;
+  cancel on miss, return the cached result on hit. Needs a runner streaming
+  refactor (the runner kwargs `speculator` are already wired, structurally
+  typed `object | None`).
+- **OpenTelemetry export** — `harness.telemetry`'s `Sink` protocol is generic
+  enough that the OTel adapter is mechanical; not built yet.
+- **Plan inference from past sessions** — `harness.plan.derive_plan` asks a
+  live planner; mining plans from successful trajectories is future work.
+- **ML-based privacy detection** — Microsoft Presidio / AWS Comprehend
+  adapters under the existing `Detector` protocol; v1 is regex + entropy.
+- **DAP / IDE-protocol integration for `harness.debug`** — the REPL is
+  in-process today; an editor-driven debugger is a separate effort.
 
 ## License
 

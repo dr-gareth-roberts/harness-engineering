@@ -107,9 +107,7 @@ def _summary_text(msg: Message | None) -> str | None:
     return "".join(parts) if parts else ""
 
 
-def compare_sessions(
-    a: SessionRecord, b: SessionRecord, *, name: str = ""
-) -> SessionDiff:
+def compare_sessions(a: SessionRecord, b: SessionRecord, *, name: str = "") -> SessionDiff:
     """Diff two session records turn-by-turn, ignoring tool-call IDs."""
     diffs: list[TurnDiff] = []
     all_match = True

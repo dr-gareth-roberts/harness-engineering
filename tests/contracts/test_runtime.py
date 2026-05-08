@@ -212,15 +212,11 @@ async def test_assistant_text_contract_fires_live_on_post_assistant_message() ->
     await hooks.emit(SessionStart())
 
     # Innocuous assistant message: no telemetry expected.
-    await hooks.emit(
-        PostAssistantMessage(message=text("assistant", "Sure, here's what I found."))
-    )
+    await hooks.emit(PostAssistantMessage(message=text("assistant", "Sure, here's what I found.")))
     assert sink.events == []
 
     # Apologetic assistant message: telemetry fires (warn, not raise).
-    await hooks.emit(
-        PostAssistantMessage(message=text("assistant", "I'm sorry, I can't help."))
-    )
+    await hooks.emit(PostAssistantMessage(message=text("assistant", "I'm sorry, I can't help.")))
     assert len(sink.events) == 1
     event = sink.events[0]
     assert isinstance(event, ContractWarning)
@@ -244,9 +240,7 @@ async def test_forbid_contract_on_assistant_text_does_not_raise() -> None:
     await hooks.emit(SessionStart())
 
     # Should NOT raise even though the contract action is `forbid`.
-    await hooks.emit(
-        PostAssistantMessage(message=text("assistant", "I'm sorry about that."))
-    )
+    await hooks.emit(PostAssistantMessage(message=text("assistant", "I'm sorry about that.")))
     # Telemetry surfaces the violation instead.
     assert len(sink.events) == 1
     assert isinstance(sink.events[0], ContractWarning)

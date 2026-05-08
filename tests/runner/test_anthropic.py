@@ -32,9 +32,7 @@ class EchoIn(BaseModel):
     text: str
 
 
-def _echo_dispatcher(
-    *, calls: list[str] | None = None
-) -> tuple[Dispatcher, list[str]]:
+def _echo_dispatcher(*, calls: list[str] | None = None) -> tuple[Dispatcher, list[str]]:
     log: list[str] = calls if calls is not None else []
 
     def echo(args: EchoIn) -> str:
@@ -180,7 +178,10 @@ async def test_max_iterations_cap_raises() -> None:
     client = FakeAsyncAnthropic(responses=responses)
     dispatcher, _ = _echo_dispatcher()
     runner = AnthropicRunner(
-        dispatcher, HookRunner(), client=client, max_iterations=3  # type: ignore[arg-type]
+        dispatcher,
+        HookRunner(),
+        client=client,
+        max_iterations=3,  # type: ignore[arg-type]
     )
 
     with pytest.raises(RuntimeError, match="max_iterations=3"):
@@ -231,7 +232,10 @@ async def test_thinking_omitted_when_disabled() -> None:
     client = FakeAsyncAnthropic(responses=[response])
     dispatcher, _ = _echo_dispatcher()
     runner = AnthropicRunner(
-        dispatcher, HookRunner(), client=client, thinking_mode="disabled"  # type: ignore[arg-type]
+        dispatcher,
+        HookRunner(),
+        client=client,
+        thinking_mode="disabled",  # type: ignore[arg-type]
     )
 
     await runner(_agent(), [text("user", "x")])

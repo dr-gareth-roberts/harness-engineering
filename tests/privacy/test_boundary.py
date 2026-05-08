@@ -495,9 +495,7 @@ async def test_tool_result_string_content_is_redacted_inbound() -> None:
     content = block.tool_result.content
     assert "[REDACTED:us_ssn]" in content
     assert "123-45-6789" not in content
-    assert any(
-        e.location == "messages[0].content[0].tool_result.content" for e in captured
-    )
+    assert any(e.location == "messages[0].content[0].tool_result.content" for e in captured)
 
 
 async def test_tool_result_nested_dict_redaction_uses_dotted_path() -> None:
@@ -534,9 +532,7 @@ async def test_tool_result_nested_dict_redaction_uses_dotted_path() -> None:
     assert new.content["ok"] is True
 
     locations = [e.location for e in captured]
-    assert (
-        "messages[0].content[0].tool_result.content.user.identifiers.ssn" in locations
-    )
+    assert "messages[0].content[0].tool_result.content.user.identifiers.ssn" in locations
 
 
 async def test_tool_result_list_element_is_redacted_with_index_grammar() -> None:
@@ -557,9 +553,7 @@ async def test_tool_result_list_element_is_redacted_with_index_grammar() -> None
 
     class ListRunner:
         async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
-            return _tool_result_msg(
-                {"hits": ["clean", "ssn=123-45-6789", "also clean"]}
-            )
+            return _tool_result_msg({"hits": ["clean", "ssn=123-45-6789", "also clean"]})
 
     wrapped = boundary.wrap(ListRunner())
     reply = await wrapped(make_agent(), [text("user", "lookup")])
@@ -567,10 +561,7 @@ async def test_tool_result_list_element_is_redacted_with_index_grammar() -> None
     assert content["hits"][1] == "ssn=[REDACTED:us_ssn]"
     assert content["hits"][0] == "clean"
 
-    assert any(
-        e.location == "messages[0].content[0].tool_result.content.hits[1]"
-        for e in captured
-    )
+    assert any(e.location == "messages[0].content[0].tool_result.content.hits[1]" for e in captured)
 
 
 async def test_recursion_depth_cap_still_catches_deep_leaks() -> None:

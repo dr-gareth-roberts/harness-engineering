@@ -30,9 +30,7 @@ async def test_happy_path() -> None:
 
 async def test_validation_error_returns_error_result() -> None:
     dispatcher = make_dispatcher()
-    result = await dispatcher.dispatch(
-        ToolCall(name="add", arguments={"a": "not-an-int", "b": 3})
-    )
+    result = await dispatcher.dispatch(ToolCall(name="add", arguments={"a": "not-an-int", "b": 3}))
     assert result.is_error is True
     assert "a" in str(result.content)
 
@@ -62,9 +60,7 @@ async def test_handler_exception_returns_error_result() -> None:
 def test_duplicate_registration_raises() -> None:
     dispatcher = make_dispatcher()
     with pytest.raises(ValueError, match="already registered"):
-        dispatcher.register(
-            Tool(name="add", description="Dup.", input_model=AddIn, handler=add)
-        )
+        dispatcher.register(Tool(name="add", description="Dup.", input_model=AddIn, handler=add))
 
 
 def test_tools_schema_lists_all() -> None:

@@ -57,9 +57,7 @@ async def test_runs_simple_command() -> None:
 
 
 async def test_captures_nonzero_exit_without_raising() -> None:
-    result = await safe_subprocess_run(
-        [sys.executable, "-c", "import sys; sys.exit(7)"]
-    )
+    result = await safe_subprocess_run([sys.executable, "-c", "import sys; sys.exit(7)"])
     assert result.returncode == 7
 
 

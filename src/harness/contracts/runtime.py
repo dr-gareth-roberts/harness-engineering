@@ -149,9 +149,7 @@ def attach_contracts(
         for dfa in dfas:
             violation = dfa.tick(event.message)
             if violation is not None:
-                await _react_to_violation_observational(
-                    dfa.contract, violation, telemetry
-                )
+                await _react_to_violation_observational(dfa.contract, violation, telemetry)
 
     hooks.register(PostAssistantMessage, on_post_assistant_message)
 
@@ -164,9 +162,7 @@ def attach_contracts(
             if violation is not None:
                 # PostToolUse can't block — the call already ran. But we still
                 # surface warn / forbid violations through telemetry.
-                await _react_to_violation_observational(
-                    dfa.contract, violation, telemetry
-                )
+                await _react_to_violation_observational(dfa.contract, violation, telemetry)
 
     hooks.register(PostToolUse, on_post_tool_use)
 

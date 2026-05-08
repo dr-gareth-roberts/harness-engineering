@@ -109,9 +109,7 @@ def test_policy_checks_multiple_arg_keys(tmp_path: Path) -> None:
     policy = PathPolicy.of(scope, ["copy"], arg_keys=("source", "destination"))
 
     # source ok, destination outside → blocked.
-    decision = policy(
-        _event("copy", source=str(tmp_path / "a"), destination="/etc/passwd")
-    )
+    decision = policy(_event("copy", source=str(tmp_path / "a"), destination="/etc/passwd"))
     assert decision is not None
     assert decision.block is True
     assert "destination" in (decision.reason or "")

@@ -80,17 +80,13 @@ async def safe_subprocess_run(
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(input=stdin), timeout=timeout
-        )
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout)
     except TimeoutError as exc:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), timeout=2.0)
-        raise SubprocessTimeout(
-            f"subprocess {cmd[0]!r} exceeded timeout of {timeout}s"
-        ) from exc
+        raise SubprocessTimeout(f"subprocess {cmd[0]!r} exceeded timeout of {timeout}s") from exc
 
     duration_ms = (time.perf_counter() - start) * 1000.0
     return SubprocessResult(

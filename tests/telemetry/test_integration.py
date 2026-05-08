@@ -164,5 +164,5 @@ async def test_jsonl_sink_under_run_parallel_writes_clean_lines(tmp_path: Path) 
 
     lines = target.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 8
-    parsed = [json.loads(line) for line in lines]      # all lines must be valid JSON
+    parsed = [json.loads(line) for line in lines]  # all lines must be valid JSON
     assert {p["agent_name"] for p in parsed} == {f"a{i}" for i in range(8)}

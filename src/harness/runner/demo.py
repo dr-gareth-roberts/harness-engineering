@@ -32,9 +32,7 @@ class EchoRunner:
         for msg in reversed(messages):
             if msg.role != "user":
                 continue
-            collected = "".join(
-                b.text or "" for b in msg.content if b.type == "text" and b.text
-            )
+            collected = "".join(b.text or "" for b in msg.content if b.type == "text" and b.text)
             if collected:
                 last_user_text = collected
                 break

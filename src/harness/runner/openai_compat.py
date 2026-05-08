@@ -78,9 +78,7 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for msg in messages:
         if msg.role == "system":
-            joined = "\n\n".join(
-                b.text or "" for b in msg.content if b.type == "text" and b.text
-            )
+            joined = "\n\n".join(b.text or "" for b in msg.content if b.type == "text" and b.text)
             if joined:
                 out.append({"role": "system", "content": joined})
             continue
@@ -96,9 +94,7 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
             elif block.type == "tool_result" and block.tool_result is not None:
                 tool_results.append(block.tool_result)
             elif block.type == "file":
-                text_parts.append(
-                    f"<file path={block.path}>\n{block.text or ''}\n</file>"
-                )
+                text_parts.append(f"<file path={block.path}>\n{block.text or ''}\n</file>")
 
         if msg.role == "assistant":
             entry: dict[str, Any] = {
