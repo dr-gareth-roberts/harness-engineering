@@ -19,6 +19,7 @@ The MVP ships seven small, composable modules:
 | `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator |
 | `harness.memory`   | `SessionRecord`, `MemoryStore` protocol, `InMemoryStore` / `FileStore`, plus a `Session` helper that snapshots after every turn |
 | `harness.sandbox`  | `PathScope` + `PathPolicy` for filesystem-scoped tool calls, `safe_subprocess_run` with scrubbed env and timeout |
+| `harness.replay`   | `ReplayRunner` for deterministic playback, `run_eval` over a list of cases, `compare_sessions` that ignores tool-call IDs |
 
 ## Install
 

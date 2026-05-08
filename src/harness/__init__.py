@@ -7,6 +7,7 @@ from harness.hooks import HookRunner
 from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
 from harness.policy import AllowList, DenyList
 from harness.prompts import Message
+from harness.replay import ReplayRunner, compare_sessions, run_eval
 from harness.sandbox import PathPolicy, PathScope, safe_subprocess_run, scrub_env
 from harness.telemetry import JSONLSink, MemorySink, Telemetry
 from harness.tools import Dispatcher, Tool
@@ -30,12 +31,15 @@ __all__ = [
     "Orchestrator",
     "PathPolicy",
     "PathScope",
+    "ReplayRunner",
     "Session",
     "SessionRecord",
     "SubAgent",
     "Telemetry",
     "Tool",
     "__version__",
+    "compare_sessions",
+    "run_eval",
     "safe_subprocess_run",
     "scrub_env",
 ]
