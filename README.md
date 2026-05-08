@@ -36,8 +36,8 @@ The "harness" is everything around the model: prompt assembly, tool wiring, perm
 | `harness.fuzz`     | Hypothesis-driven fuzzing (extra `[fuzz]`); `fuzz_tool` (drives Pydantic-typed inputs through `Dispatcher.dispatch`), `fuzz_agent` (drives them through a full `Orchestrator` turn), `harness_property` pytest decorator; lazy imports — module loads without the extra |
 | `harness.attribute`| Causal provenance via leave-one-out ablation; `attribute(session, target, runner, agent, granularity, similarity)` ranks input chunks by influence on a target output. `JaccardSimilarity` / `LengthRatio` zero-dep, `EmbeddingSimilarity` opt-in (extra `[attribute]`) |
 | `harness.cache`    | Prompt-prefix-drift watcher; `PrefixWatcher` satisfies the runner's structural `prefix_watcher=` protocol, fingerprints each cache breakpoint per request, `audit(store, window_hours)` surfaces silent invalidators with `unified_diff`; ships `harness cache-audit` CLI subcommand |
-| `harness.debug`    | `pdb`-flavored debugger for orchestrator runs; `DebugRunner(real_runner, ...)` wraps any runner, pauses on a configurable predicate, exposes a `DebugContext` for inspect / mutate / fire / resume / abort, programmatic and interactive REPL modes; ships `harness debug` CLI subcommand for offline replay debugging |
-| `harness.speculate`| Pre-execute likely tool calls in `asyncio` tasks while the model generates; `Speculator` satisfies the runner's structural `speculator=` protocol, hits skip the runner's `PreToolUse` / dispatch / `PostToolUse` cycle. Ships `LastCallPredictor`, `SequencePredictor` (bigram), and `CrossSessionPredictor` (loads the K most-recent SessionRecords from a `MemoryStore`, runs bigram logic across the union with sentinel boundaries between sessions); plug a custom `Predictor` as needed. Wired into both `AnthropicRunner` and `OpenAICompatRunner`. Idempotency is a tool-author promise: speculator only fires for `Tool.idempotent=True` |
+| `harness.debug`    | `pdb`-flavored debugger for orchestrator runs; `DebugRunner(real_runner, ...)` wraps any runner, pauses on a configurable predicate, exposes a `DebugContext` for inspect / mutate / fire / resume / abort. Three modes: programmatic (callback), interactive REPL (`harness debug`), and **DAP server over stdio** (`harness debug --dap`) so VS Code / neovim-dap / Emacs dap-mode drive the same replay-driven session |
+| `harness.speculate`| Pre-execute likely tool calls in `asyncio` tasks while the model generates; `Speculator` satisfies the runner's structural `speculator=` protocol, hits skip the runner's `PreToolUse` / dispatch / `PostToolUse` cycle. Per-event lifecycle (`begin` / `observe` / `cancel_unobserved` / `try_resolve` / `end`): event-aware runners (`AnthropicRunner`) surface each `tool_use` block as it arrives in the stream so unmatched speculations get cancelled at stream-end, before dispatch begins. Ships `LastCallPredictor`, `SequencePredictor` (bigram), and `CrossSessionPredictor` (loads the K most-recent SessionRecords from a `MemoryStore`, runs bigram logic across the union with sentinel boundaries between sessions); plug a custom `Predictor` as needed. Wired into both `AnthropicRunner` and `OpenAICompatRunner`. Idempotency is a tool-author promise: speculator only fires for `Tool.idempotent=True` |
 
 ### CLI
 
@@ -124,14 +124,14 @@ Currently deferred (PRs welcome):
   cancel on miss, return the cached result on hit. Needs a runner streaming
   refactor (the runner kwargs `speculator` are already wired, structurally
   typed `object | None`).
-- **OpenTelemetry export** — `harness.telemetry`'s `Sink` protocol is generic
-  enough that the OTel adapter is mechanical; not built yet.
-- **Plan inference from past sessions** — `harness.plan.derive_plan` asks a
-  live planner; mining plans from successful trajectories is future work.
 - **ML-based privacy detection** — Microsoft Presidio / AWS Comprehend
   adapters under the existing `Detector` protocol; v1 is regex + entropy.
-- **DAP / IDE-protocol integration for `harness.debug`** — the REPL is
-  in-process today; an editor-driven debugger is a separate effort.
+- **Eager per-block speculator cancellation** — today an unmatched
+  speculation gets cancelled at stream-end (after the model is done
+  speaking). A future refinement could cancel mid-stream when a single
+  emitted `tool_use` makes the speculation definitively a miss; the
+  protocol shape (`observe()` per block) leaves room for it without
+  breaking changes.
 
 ## License
 
