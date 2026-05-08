@@ -16,7 +16,6 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import pytest
 from pydantic import BaseModel
 
 from harness.agents import Orchestrator, SubAgent
@@ -576,11 +575,3 @@ def test_module_imports_clean() -> None:
     )
 
 
-# Suppress the per-test async-cancellation warning that pytest-asyncio
-# surfaces when tests cancel the serve_task without awaiting it on
-# every error path. The cancellation is intentional cleanup.
-@pytest.fixture(autouse=True)
-def _silence_pending_task_warnings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("warnings.warn", lambda *a, **kw: None)
