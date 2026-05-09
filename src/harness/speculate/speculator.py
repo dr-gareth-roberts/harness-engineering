@@ -221,8 +221,17 @@ class Speculator:
         speculator launched multiple specs for the same call (rare, but
         permitted).
 
-        No telemetry is emitted here; an `observe` is bookkeeping, not a
-        hit. The hit/miss event still fires from `try_resolve`.
+        Wave 13b #2 — eager per-block cancellation: when
+        `max_speculations == 1` and we see a non-matching call, the
+        lone pending speculation is definitively a miss. Cancel it
+        immediately instead of waiting for `cancel_unobserved` at
+        stream-end. Saves the model's still-streaming text-tail's
+        worth of handler runtime on miss. For `max_speculations > 1`,
+        keep the stream-end policy — correctness with multiple
+        pending requires policy that's not worth the complexity.
+
+        No telemetry is emitted here; an `observe` is bookkeeping, not
+        a hit. The hit/miss event still fires from `try_resolve`.
         """
         for entry in self._pending:
             if (
@@ -232,6 +241,15 @@ class Speculator:
             ):
                 entry.observed = True
                 return
+
+        # Wave 13b #2 — eager cancellation in the simple case. With a
+        # single pending speculation, an unmatched observation means
+        # the lone spec is definitively a miss; cancel right now.
+        if self._max_speculations == 1 and len(self._pending) == 1:
+            unobserved_pending = [e for e in self._pending if not e.observed]
+            if len(unobserved_pending) == 1:
+                self._pending = []
+                await self._cancel_entries(unobserved_pending)
 
     async def cancel_unobserved(self) -> None:
         """Cancel pending speculations that no `observe` claimed.

@@ -697,3 +697,130 @@ async def test_observe_claims_separate_entries_for_duplicate_calls() -> None:
 
     assert r1 is not None and r1.id == "m1"
     assert r2 is not None and r2.id == "m2"
+
+
+# ---------------------------------------------------------------------------
+# Wave 13b #2: eager per-block cancellation
+
+
+async def test_observe_eagerly_cancels_lone_speculation_on_miss() -> None:
+    """When max_speculations == 1 and the observed call doesn't match
+    the lone pending spec, observe cancels it immediately. The
+    motivating case is a slow handler that would otherwise keep
+    burning runtime until cancel_unobserved at stream-end.
+
+    The pin: a speculation with a 10-second sleep is cancelled within
+    milliseconds of the first non-matching observe."""
+    log: list[str] = []
+    cancelled = asyncio.Event()
+
+    async def slow_handler(args: _Args) -> str:
+        try:
+            log.append("start")
+            await asyncio.sleep(10.0)
+            log.append("done")
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "should-not-finish"
+
+    dispatcher = Dispatcher(
+        [
+            Tool(
+                name="search",
+                description="",
+                input_model=_Args,
+                handler=slow_handler,
+                idempotent=True,
+            ),
+        ]
+    )
+
+    speculator = Speculator(LastCallPredictor(history_window=1), max_speculations=1)
+    await speculator.begin(
+        history=_history_with_call("search", {"q": "x"}),
+        agent=_agent(["search"]),
+        dispatcher=dispatcher,
+        hooks=HookRunner(),
+    )
+
+    # Give the speculation a tick to start.
+    await asyncio.sleep(0.01)
+
+    # Observe a different call — eager cancellation should fire.
+    start = time.perf_counter()
+    await speculator.observe(ToolCall(name="other_tool", arguments={}, id="m1"))
+    elapsed = time.perf_counter() - start
+
+    # observe drains the cancel synchronously (within itself), so
+    # elapsed is dominated by cancellation work, not the 10s sleep.
+    assert elapsed < 0.5, (
+        f"observe should cancel within ~ms, took {elapsed * 1000:.0f}ms — "
+        "eager cancellation did not fire"
+    )
+    # The handler observed cancellation (or never started — both are
+    # valid wins).
+    assert cancelled.is_set() or "start" not in log
+
+    # Pending is now empty; subsequent try_resolve returns None.
+    result = await speculator.try_resolve(ToolCall(name="search", arguments={"q": "x"}, id="m2"))
+    assert result is None
+
+    await speculator.end()
+
+
+async def test_observe_does_not_eagerly_cancel_when_max_speculations_is_two() -> None:
+    """With max_speculations > 1, the eager-cancel policy is *not*
+    applied — an unmatched first observe might still see a matching
+    second observe. Stream-end cancel_unobserved handles the cleanup."""
+    log: list[str] = []
+    dispatcher = _dispatcher(
+        idempotent=["search", "parse"],
+        handler_log=log,
+        slow_handlers={"search": 0.05, "parse": 0.05},
+    )
+
+    history = [
+        Message(role="user", content=[ContentBlock(type="text", text="hi")]),
+        Message(
+            role="assistant",
+            content=[
+                ContentBlock(
+                    type="tool_use",
+                    tool_use=ToolCall(name="search", arguments={"q": "x"}, id="a"),
+                )
+            ],
+        ),
+        Message(
+            role="assistant",
+            content=[
+                ContentBlock(
+                    type="tool_use",
+                    tool_use=ToolCall(name="parse", arguments={"q": "x"}, id="b"),
+                )
+            ],
+        ),
+    ]
+
+    speculator = Speculator(LastCallPredictor(history_window=2), max_speculations=2)
+    await speculator.begin(
+        history=history,
+        agent=_agent(["search", "parse"]),
+        dispatcher=dispatcher,
+        hooks=HookRunner(),
+    )
+
+    # Observe a non-matching call. With max_speculations=2, eager
+    # cancel doesn't fire — both pending specs survive.
+    await speculator.observe(ToolCall(name="other_tool", arguments={}, id="m1"))
+
+    # The matching observe arrives next; it claims `parse`.
+    await speculator.observe(ToolCall(name="parse", arguments={"q": "x"}, id="m2"))
+
+    # `search` is still pending and unobserved.
+    assert len(speculator._pending) == 2  # noqa: SLF001 - test internals
+    observed_count = sum(1 for e in speculator._pending if e.observed)  # noqa: SLF001
+    assert observed_count == 1
+
+    await speculator.cancel_unobserved()
+    await speculator.end()
