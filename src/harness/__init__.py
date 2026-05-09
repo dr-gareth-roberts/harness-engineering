@@ -72,6 +72,14 @@ from harness.speculate import (
     SequencePredictor,
     Speculator,
 )
+from harness.streaming import (
+    MessageEnd,
+    StreamEvent,
+    StreamingRunner,
+    TextDelta,
+    ToolUseEnd,
+    ToolUseStart,
+)
 from harness.telemetry import JSONLSink, MemorySink, Telemetry
 from harness.tools import Dispatcher, Tool
 
@@ -117,6 +125,7 @@ __all__ = [
     "LengthRatio",
     "MemorySink",
     "Message",
+    "MessageEnd",
     "Mutation",
     "OpenAICompatRunner",
     "OpenTelemetrySink",
@@ -140,9 +149,14 @@ __all__ = [
     "Session",
     "SessionRecord",
     "Speculator",
+    "StreamEvent",
+    "StreamingRunner",
     "SubAgent",
     "Telemetry",
+    "TextDelta",
     "Tool",
+    "ToolUseEnd",
+    "ToolUseStart",
     "Violation",
     "__version__",
     "attach_contracts",
