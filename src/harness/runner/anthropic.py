@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 try:
@@ -46,6 +47,13 @@ from harness.hooks.events import (
 from harness.hooks.runner import HookRunner
 from harness.prompts.messages import ContentBlock, Message
 from harness.runner.protocols import PrefixWatcherProtocol, SpeculatorProtocol
+from harness.streaming import (
+    MessageEnd,
+    StreamEvent,
+    TextDelta,
+    ToolUseEnd,
+    ToolUseStart,
+)
 from harness.tools.dispatcher import Dispatcher
 from harness.tools.schema import ToolCall, ToolResult
 
@@ -452,6 +460,205 @@ class AnthropicRunner:
                 ]
                 # Mirror into running_history so the next iteration's
                 # speculator.begin sees the tool_results we just sent back.
+                running_history.append(Message(role="user", content=synthesized_result_blocks))
+            finally:
+                if self._speculator is not None:
+                    await self._speculator.end()
+
+        raise RuntimeError(
+            f"Tool-use loop exceeded max_iterations={self._max_iterations}. "
+            "Increase the cap, constrain the tool surface, or shorten the conversation."
+        )
+
+    async def run_stream(
+        self,
+        agent: SubAgent,
+        messages: list[Message],
+    ) -> AsyncIterator[StreamEvent]:
+        """Run the same tool-use loop as `__call__` but yield streaming
+        events as the model generates.
+
+        Per the wave-13a advisor review, this is a parallel method to
+        `__call__` rather than a refactor — `__call__`'s 150 lines of
+        tool-use-loop / speculator / hook / cache-cap / timeout /
+        replacement / pause-refusal logic is too well tested to risk
+        moving wholesale into a generator. The duplication is
+        intentional and bounded; refactoring to share the loop body is
+        a follow-up wave once both paths are proven.
+
+        Yield order, per iteration:
+        - `TextDelta(text=...)` — once per SDK `text` delta event.
+        - `ToolUseStart(call=...)` — once per `content_block_stop` for
+          a tool_use block, *after* speculator.observe but *before*
+          the runner's hook + dispatch cycle.
+        - `ToolUseEnd(call=..., result=...)` — once per dispatched
+          tool call, after the result is finalized.
+
+        At the very end (`end_turn` / `stop_sequence` / `pause_turn` /
+        `refusal`), yields exactly one `MessageEnd(message=...)` and
+        returns. `MessageEnd.message` matches what `__call__` would
+        have returned.
+        """
+        api_messages, system = _translate_in(messages)
+        request = self._build_request(agent, api_messages, system)
+
+        running_history: list[Message] = list(messages)
+
+        for _ in range(self._max_iterations):
+            count = _count_cache_breakpoints(request)
+            if count > _CACHE_BREAKPOINT_LIMIT:
+                raise CacheBreakpointLimitExceeded(
+                    f"Anthropic caps cache breakpoints at "
+                    f"{_CACHE_BREAKPOINT_LIMIT}; got {count}. "
+                    "Remove some `ContentBlock.cache=True` markers, or "
+                    "use `harness.prompts.compact` to trim the prefix."
+                )
+
+            if self._prefix_watcher is not None:
+                await self._prefix_watcher.fingerprint(request)
+
+            if self._speculator is not None:
+                await self._speculator.begin(
+                    history=running_history,
+                    agent=agent,
+                    dispatcher=self.dispatcher,
+                    hooks=self.hooks,
+                )
+
+            try:
+                async with self._stream_with_timeout(request) as stream:
+                    async for event in stream:
+                        # Text deltas: yield as TextDelta.
+                        event_type = getattr(event, "type", None)
+                        if event_type == "text":
+                            text_value = getattr(event, "text", None)
+                            if text_value:
+                                yield TextDelta(text=text_value)
+                            continue
+
+                        # tool_use block done: surface to speculator AND
+                        # yield ToolUseStart so the caller can react
+                        # before the runner dispatches. The dispatch
+                        # itself happens after `get_final_message`.
+                        if (
+                            event_type == "content_block_stop"
+                            and getattr(getattr(event, "content_block", None), "type", None)
+                            == "tool_use"
+                        ):
+                            block = event.content_block
+                            call = ToolCall(
+                                name=block.name,
+                                arguments=dict(block.input),
+                                id=block.id,
+                            )
+                            if self._speculator is not None:
+                                await self._speculator.observe(call)
+                            yield ToolUseStart(call=call)
+                    response = await stream.get_final_message()
+
+                if self._speculator is not None:
+                    await self._speculator.cancel_unobserved()
+
+                assistant_message = _translate_out(response)
+                running_history.append(assistant_message)
+                await self.hooks.emit(PostAssistantMessage(message=assistant_message))
+
+                # Terminal stop reasons: emit MessageEnd and return.
+                if response.stop_reason in ("end_turn", "stop_sequence"):
+                    yield MessageEnd(message=assistant_message)
+                    return
+
+                if response.stop_reason == "pause_turn":
+                    await self.hooks.emit(PauseTurn(message=assistant_message, reason="pause_turn"))
+                    yield MessageEnd(message=assistant_message)
+                    return
+
+                if response.stop_reason == "refusal":
+                    await self.hooks.emit(Refusal(message=assistant_message))
+                    yield MessageEnd(message=assistant_message)
+                    return
+
+                if response.stop_reason != "tool_use":
+                    raise RuntimeError(
+                        f"Unexpected stop_reason from model: {response.stop_reason!r}. "
+                        "Known reasons handled: end_turn, stop_sequence, tool_use, "
+                        "pause_turn, refusal."
+                    )
+
+                request["messages"] = [
+                    *request["messages"],
+                    {"role": "assistant", "content": response.content},
+                ]
+
+                tool_result_blocks: list[dict[str, Any]] = []
+                synthesized_result_blocks: list[ContentBlock] = []
+                for block in response.content:
+                    if block.type != "tool_use":
+                        continue
+                    call = ToolCall(name=block.name, arguments=dict(block.input), id=block.id)
+
+                    speculative_result: ToolResult | None = None
+                    if self._speculator is not None:
+                        speculative_result = await self._speculator.try_resolve(call)
+
+                    if speculative_result is not None:
+                        result = speculative_result
+                    else:
+                        pre_decisions = await self.hooks.emit(PreToolUse(call=call))
+                        blocked = next((d for d in pre_decisions if d.block), None)
+                        replaced = next(
+                            (d for d in pre_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
+                        if blocked is not None:
+                            result = ToolResult(
+                                id=block.id,
+                                content=blocked.reason or "blocked by hook",
+                                is_error=True,
+                            )
+                        elif replaced is not None:
+                            assert isinstance(replaced.replacement, ToolResult)
+                            result = ToolResult(
+                                id=block.id,
+                                content=replaced.replacement.content,
+                                is_error=replaced.replacement.is_error,
+                            )
+                        else:
+                            result = await self.dispatcher.dispatch(call)
+
+                        post_decisions = await self.hooks.emit(
+                            PostToolUse(call=call, result=result)
+                        )
+                        post_replacement = next(
+                            (d for d in post_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
+                        if post_replacement is not None:
+                            assert isinstance(post_replacement.replacement, ToolResult)
+                            result = ToolResult(
+                                id=block.id,
+                                content=post_replacement.replacement.content,
+                                is_error=post_replacement.replacement.is_error,
+                            )
+
+                    yield ToolUseEnd(call=call, result=result)
+
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": _serialize_tool_content(result.content),
+                            "is_error": result.is_error,
+                        }
+                    )
+                    synthesized_result_blocks.append(
+                        ContentBlock(type="tool_result", tool_result=result)
+                    )
+
+                request["messages"] = [
+                    *request["messages"],
+                    {"role": "user", "content": tool_result_blocks},
+                ]
                 running_history.append(Message(role="user", content=synthesized_result_blocks))
             finally:
                 if self._speculator is not None:

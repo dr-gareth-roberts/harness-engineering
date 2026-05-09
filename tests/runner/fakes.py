@@ -58,6 +58,17 @@ class FakeContentBlockStopEvent:
 
 
 @dataclass
+class FakeTextEvent:
+    """Mimics the SDK's `TextEvent` (one of the high-level events the
+    SDK accumulator yields for text deltas). The runner reads
+    `event.type == "text"` and `event.text` to build a `TextDelta`.
+    """
+
+    text: str
+    type: str = "text"
+
+
+@dataclass
 class FakeMessage:
     content: list[Any]
     stop_reason: str
