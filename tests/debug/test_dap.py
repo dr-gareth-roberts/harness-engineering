@@ -573,3 +573,207 @@ def test_module_imports_clean() -> None:
         StackFrame,
         Variable,
     )
+
+
+# ---------------------------------------------------------------------------
+# Wave 13b #16: pause request
+
+
+async def test_pause_sets_flag_so_next_break_on_check_fires() -> None:
+    """The DAP `pause` request flips a flag the runner's `break_on`
+    consults; the next runner invocation pauses unconditionally.
+    Editor's pause button now works."""
+    adapter, _ = _build_adapter(canned_replies=["x"], break_at_turns=[])
+    serve_task, send, recv = await _serve(adapter)
+    try:
+        # Send a pause request without launching — it just sets a flag.
+        await send({"seq": 1, "type": "request", "command": "pause"})
+        resp = await recv()
+        assert resp["success"] is True
+
+        # Predicate now fires unconditionally on the next consult.
+        # Use a trivial DebugContext to drive the predicate directly.
+        from harness.debug.context import DebugContext
+        from harness.prompts import text as text_msg
+
+        ctx = DebugContext([text_msg("user", "hi")])
+        # First check → True (consumes the flag).
+        assert adapter.break_on_predicate(ctx) is True
+        # Second check → False (flag was consumed; no scheduled bps).
+        assert adapter.break_on_predicate(ctx) is False
+    finally:
+        serve_task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# Wave 13b #15: step semantics
+
+
+async def test_next_sets_step_over_flag() -> None:
+    adapter, _ = _build_adapter(canned_replies=["x"], break_at_turns=[0])
+    serve_task, send, recv = await _serve(adapter)
+    try:
+        await send({"seq": 1, "type": "request", "command": "initialize"})
+        await recv()
+        await recv()
+        await send({"seq": 2, "type": "request", "command": "launch"})
+        await recv()
+        await _wait_event(recv, "stopped", timeout=1.0)
+
+        await send({"seq": 10, "type": "request", "command": "next"})
+        await recv()
+        # `next` set step_over and resumed; verify the flag is set.
+        assert adapter._step_mode == "step_over"
+
+        # Drain remaining events.
+        await _wait_event(recv, "terminated", timeout=1.0)
+    finally:
+        serve_task.cancel()
+
+
+async def test_step_over_predicate_fires_then_clears() -> None:
+    """After `next` is sent, the next break_on check fires; subsequent
+    checks fall back to the configured per-turn breakpoints."""
+    adapter, _ = _build_adapter(canned_replies=["x"], break_at_turns=[])
+    adapter._step_mode = "step_over"
+
+    from harness.debug.context import DebugContext
+    from harness.prompts import text as text_msg
+
+    ctx = DebugContext([text_msg("user", "hi")])
+    assert adapter.break_on_predicate(ctx) is True
+    # Flag consumed.
+    assert adapter._step_mode is None
+    # Next check is governed by the per-turn breakpoints (empty → False).
+    assert adapter.break_on_predicate(ctx) is False
+
+
+# ---------------------------------------------------------------------------
+# Wave 13b #17: evaluate parity opt-in
+
+
+async def test_evaluate_default_only_returns_supported_names() -> None:
+    """Without launch arg `allowEvaluate: true`, evaluate returns the
+    same restricted name set as before (Wave 7 behavior)."""
+    adapter, _ = _build_adapter(canned_replies=["x"], break_at_turns=[0])
+    serve_task, send, recv = await _serve(adapter)
+    try:
+        await send({"seq": 1, "type": "request", "command": "initialize"})
+        await recv()
+        await recv()
+        await send({"seq": 2, "type": "request", "command": "launch"})
+        await recv()
+        await _wait_event(recv, "stopped", timeout=1.0)
+
+        # Arbitrary expression → error (no allowEvaluate).
+        await send(
+            {
+                "seq": 10,
+                "type": "request",
+                "command": "evaluate",
+                "arguments": {"expression": "1 + 1"},
+            }
+        )
+        resp = await recv()
+        assert resp["success"] is False
+        assert "unsupported expression" in resp["message"]
+
+        # Continue + drain.
+        await send({"seq": 99, "type": "request", "command": "continue"})
+        await recv()
+        await _wait_event(recv, "terminated", timeout=1.0)
+    finally:
+        serve_task.cancel()
+
+
+async def test_evaluate_with_allow_evaluate_runs_arbitrary_python() -> None:
+    """Editor passes `allowEvaluate: true` in launch args; evaluate
+    routes through the REPL's `evaluate_in_context` helper."""
+    adapter, _ = _build_adapter(canned_replies=["x"], break_at_turns=[0])
+    serve_task, send, recv = await _serve(adapter)
+    try:
+        await send({"seq": 1, "type": "request", "command": "initialize"})
+        await recv()
+        await recv()
+        await send(
+            {
+                "seq": 2,
+                "type": "request",
+                "command": "launch",
+                "arguments": {"allowEvaluate": True},
+            }
+        )
+        await recv()
+        await _wait_event(recv, "stopped", timeout=1.0)
+
+        # Arbitrary Python expression — succeeds with allowEvaluate.
+        await send(
+            {
+                "seq": 10,
+                "type": "request",
+                "command": "evaluate",
+                "arguments": {"expression": "1 + 1"},
+            }
+        )
+        resp = await recv()
+        assert resp["success"] is True
+        assert resp["body"]["result"] == "2"
+
+        # ctx is bound — can introspect.
+        await send(
+            {
+                "seq": 11,
+                "type": "request",
+                "command": "evaluate",
+                "arguments": {"expression": "ctx.turn_index"},
+            }
+        )
+        resp = await recv()
+        assert resp["success"] is True
+        assert resp["body"]["result"] == "0"
+
+        await send({"seq": 99, "type": "request", "command": "continue"})
+        await recv()
+        await _wait_event(recv, "terminated", timeout=1.0)
+    finally:
+        serve_task.cancel()
+
+
+async def test_evaluate_with_allow_evaluate_surface_errors_as_failed_response() -> None:
+    """A bad expression surfaces as a non-success response with the
+    error message, not a crashing adapter."""
+    adapter, _ = _build_adapter(canned_replies=["x"], break_at_turns=[0])
+    serve_task, send, recv = await _serve(adapter)
+    try:
+        await send({"seq": 1, "type": "request", "command": "initialize"})
+        await recv()
+        await recv()
+        await send(
+            {
+                "seq": 2,
+                "type": "request",
+                "command": "launch",
+                "arguments": {"allowEvaluate": True},
+            }
+        )
+        await recv()
+        await _wait_event(recv, "stopped", timeout=1.0)
+
+        # Syntax error.
+        await send(
+            {
+                "seq": 10,
+                "type": "request",
+                "command": "evaluate",
+                "arguments": {"expression": "not valid python @@"},
+            }
+        )
+        resp = await recv()
+        assert resp["success"] is False
+        assert "SyntaxError" in resp["message"]
+
+        await send({"seq": 99, "type": "request", "command": "continue"})
+        await recv()
+        await _wait_event(recv, "terminated", timeout=1.0)
+    finally:
+        serve_task.cancel()

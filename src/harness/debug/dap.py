@@ -86,13 +86,28 @@ class DapAdapter:
     """Variables reference for the single 'context' scope. Kept distinct
     from any future per-variable refs by living in its own range."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_evaluate: bool = False) -> None:
         # Breakpoint coordination — see module docstring on concurrency.
         self._continue_event = asyncio.Event()
         self._current_ctx: DebugContext | None = None
 
         # Set of 0-based turn_index values where the editor wants to break.
         self._breakpoint_turns: set[int] = set()
+
+        # Wave 13b #16 — pause-on-demand. When True, the next `break_on`
+        # check fires unconditionally so the next runner invocation
+        # pauses. Cleared automatically once consumed.
+        self._pause_requested = False
+        # Wave 13b #15 — step semantics. When set, the next break_on
+        # check fires for the matching step type, then clears.
+        # `step_over` (next): break before the next runner invocation
+        # (step over a tool call).
+        # `step_in`: break in the next PreToolUse hook (step into the
+        # tool's handler).
+        # `step_out`: break before the next assistant message produces
+        # (effectively the same as step_over today, until the runner
+        # exposes finer granularity).
+        self._step_mode: str | None = None
 
         # Outgoing message sequence. DAP requires a strictly increasing
         # `seq` on every adapter→editor message.
@@ -106,6 +121,14 @@ class DapAdapter:
         self._launched = False
         self._terminated = False
 
+        # Wave 13b #17 — opt-in arbitrary expression evaluation in DAP
+        # `evaluate`. Off by default; the editor passes `allowEvaluate:
+        # true` in the launch arguments to enable. When on, the
+        # `evaluate` handler routes through the same expression-
+        # resolution path the interactive REPL uses.
+        self._allow_evaluate_default = allow_evaluate
+        self._allow_evaluate = allow_evaluate
+
         # Caller-supplied wiring.
         self.run_session: SessionRunner | None = None
         self.synthesize_source: SourceProvider | None = None
@@ -114,12 +137,32 @@ class DapAdapter:
 
     @property
     def break_on_predicate(self) -> BreakPredicate:
-        """Closure that consults `_breakpoint_turns`. Pass to `DebugRunner`'s
-        `break_on=` so `setBreakpoints` can mutate the breakpoint set
-        without rebuilding the runner.
+        """Closure that consults `_breakpoint_turns`, the pause flag, and
+        the step-mode flag. Pass to `DebugRunner`'s `break_on=` so
+        `setBreakpoints` / `pause` / `next`-`stepIn`-`stepOut` can
+        mutate state without rebuilding the runner.
+
+        Order:
+        - If `pause` was requested, fire (and clear the flag).
+        - If `step_over` / `step_out` is set, fire (and clear). Step-in
+          uses a different break point — it's a one-shot PreToolUse
+          hook the runner installs separately, not break_on. So
+          break_on doesn't react to step_in.
+        - Otherwise, the per-turn breakpoints from setBreakpoints.
         """
 
         def _break(ctx: DebugContext) -> bool:
+            if self._pause_requested:
+                # Consume the request once it fires so a follow-up
+                # `continue` doesn't immediately re-pause.
+                self._pause_requested = False
+                return True
+            if self._step_mode in ("step_over", "step_out"):
+                # Step over a tool call (next) and step out (return to
+                # assistant) both pause before the next runner
+                # invocation. Cleared after consumption.
+                self._step_mode = None
+                return True
             return ctx.turn_index in self._breakpoint_turns
 
         return _break
@@ -238,6 +281,12 @@ class DapAdapter:
             await self._respond(seq, "launch", success=False, message="already launched")
             return
         self._launched = True
+        # Wave 13b #17 — opt-in arbitrary expression evaluation. The
+        # editor passes `allowEvaluate: true` in the launch args to
+        # enable. Default falls back to whatever was set at adapter
+        # construction time.
+        if "allowEvaluate" in args:
+            self._allow_evaluate = bool(args["allowEvaluate"])
         await self._respond(seq, "launch")
         # Run the session concurrently. The DAP message loop continues
         # to pump while the orchestrator runs; both share the same event
@@ -253,24 +302,45 @@ class DapAdapter:
         await self._resume_breakpoint()
 
     async def _on_next(self, seq: int, args: dict[str, Any]) -> None:
-        # No intra-turn granularity yet — same as continue. Kept distinct
-        # so editors that prefer step-over over continue don't get
-        # silently surprised by the alias.
+        # Wave 13b #15 — step over the next tool call. Set the step
+        # flag so the next break_on check fires; resume the current
+        # breakpoint so the runner advances. The `break_on` predicate
+        # then auto-pauses again when the next runner invocation
+        # starts (typically the next iteration of the tool-use loop).
+        self._step_mode = "step_over"
         await self._respond(seq, "next")
         await self._resume_breakpoint()
 
     async def _on_stepIn(self, seq: int, args: dict[str, Any]) -> None:
+        # Wave 13b #15 — step into. Today, agent trajectories don't
+        # have a separate "tool handler" frame the debugger could step
+        # into; the closest thing is "stop right after the next tool
+        # call returns." Use the same step_over semantics for now;
+        # documented as a follow-up to enrich with a one-shot
+        # PreToolUse breakpoint when the DebugRunner exposes that
+        # surface.
+        self._step_mode = "step_over"
         await self._respond(seq, "stepIn")
         await self._resume_breakpoint()
 
     async def _on_stepOut(self, seq: int, args: dict[str, Any]) -> None:
+        # Wave 13b #15 — step out. Run to the next assistant message,
+        # then pause. Today the granularity is the same as step_over
+        # (per-turn). When the runner grows finer step granularity,
+        # this can become "ignore the next N tool calls until we see
+        # an end_turn."
+        self._step_mode = "step_out"
         await self._respond(seq, "stepOut")
         await self._resume_breakpoint()
 
     async def _on_pause(self, seq: int, args: dict[str, Any]) -> None:
-        # Pause-on-demand isn't supported — the runner only pauses at
-        # configured breakpoints. Acknowledge the request so editors
-        # don't error, but do nothing.
+        # Wave 13b #16 — pause on demand. Set the pause flag; the next
+        # `break_on` check fires unconditionally and the runner stops
+        # at the next opportunity (typically the next iteration of
+        # the tool-use loop). The editor's pause button now works.
+        # If we're currently mid-breakpoint there's nothing to do —
+        # the editor sees the existing `stopped` event.
+        self._pause_requested = True
         await self._respond(seq, "pause")
 
     async def _on_threads(self, seq: int, args: dict[str, Any]) -> None:
@@ -339,17 +409,49 @@ class DapAdapter:
     async def _on_evaluate(self, seq: int, args: dict[str, Any]) -> None:
         """Resolve `expression` against the held DebugContext.
 
-        Limited to the same field set as the `variables` view —
-        `turn_index`, `message_count`, `last_call.name`,
-        `last_call.arguments`, `pending_mutation.role`. Arbitrary-
-        expression evaluation is intentionally out of scope; the
-        interactive REPL is the surface for that.
+        Two modes:
+
+        - **Default** — limited to the same field set the `variables`
+          view exposes (`turn_index`, `message_count`,
+          `last_call.name`, `last_call.arguments`,
+          `pending_mutation.role`). Safe surface; what most editor
+          users want.
+        - **`allowEvaluate: true`** in the launch arguments (Wave 13b
+          #17) — routes through the same code path as the REPL's
+          `inspect` command, accepting arbitrary Python expressions
+          against `ctx`. Same security trade-off as the REPL: only
+          reachable when a breakpoint hits in an opt-in debug session,
+          never in production paths. Documented as the explicit
+          opt-in for editor users who want REPL-equivalent power.
         """
         expression = str(args.get("expression", "")).strip()
         ctx = self._current_ctx
         if ctx is None:
             await self._respond(
                 seq, "evaluate", success=False, message="no active breakpoint to evaluate against"
+            )
+            return
+
+        if self._allow_evaluate:
+            from harness.debug.repl import evaluate_in_context
+
+            try:
+                value = evaluate_in_context(expression, ctx)
+            except Exception as exc:  # noqa: BLE001 - surface to editor as a failed response
+                await self._respond(
+                    seq,
+                    "evaluate",
+                    success=False,
+                    message=f"{type(exc).__name__}: {exc}",
+                )
+                return
+            await self._respond(
+                seq,
+                "evaluate",
+                body={
+                    "result": repr(value),
+                    "variablesReference": 0,
+                },
             )
             return
 
