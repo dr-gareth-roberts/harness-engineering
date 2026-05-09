@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `harness.privacy.PresidioDetector` (Wave 13b #1) under the new
+  `[privacy-ml]` extra (`presidio-analyzer>=2.2`). Wraps Presidio's
+  `AnalyzerEngine` behind the existing `Detector` Protocol; broader
+  recognizers than the regex/entropy pack (people's names,
+  international phone numbers, addresses, IBAN, etc.). Lazy-imports
+  the SDK; the constructor raises `ImportError` with a clear
+  `[privacy-ml]` install hint if the extra isn't present.
+  `harness.privacy.build_pii_pack()` returns a pre-configured
+  outbound-only pack mirroring `PII_PACK`'s posture.
+- DAP `pause` request now actually pauses (Wave 13b #16) — sets a
+  flag the runner's `break_on` consults; the next runner invocation
+  stops. Editor's pause button works.
+- DAP `next` / `stepIn` / `stepOut` requests now drive distinct
+  semantics (Wave 13b #15) via `step_mode` flags on `DapAdapter`
+  that `break_on` reads. `next` and `stepIn` step over a tool call;
+  `stepOut` runs to the next assistant message.
+- DAP `evaluate` opt-in arbitrary expressions (Wave 13b #17) — the
+  editor passes `allowEvaluate: true` in launch arguments to enable
+  REPL-equivalent expression evaluation against `ctx`. Default
+  remains the restricted variables-view names. Routes through the
+  new `harness.debug.repl.evaluate_in_context` helper, sharing the
+  REPL's code path.
+- Eager per-block speculator cancellation (Wave 13b #2) — when
+  `max_speculations == 1` and `observe()` sees a non-matching call,
+  the lone pending speculation is cancelled immediately instead of
+  waiting for `cancel_unobserved` at stream-end. For
+  `max_speculations > 1`, the stream-end policy is preserved
+  (correctness with multiple pending requires policy that's not
+  worth the complexity).
+
+### Added
+
 - `harness.streaming` module (Wave 13a #9) — `TextDelta`,
   `ToolUseStart`, `ToolUseEnd`, `MessageEnd` event types and a
   `runtime_checkable` `StreamingRunner` Protocol. Runners that

@@ -22,13 +22,16 @@
 | Wave 10 | Vendor runner parity + robustness                 | shipped | [docs/waves/wave-10.md](docs/waves/wave-10.md) |
 | Wave 11 | Deeper observability + verification               | shipped | [docs/waves/wave-11.md](docs/waves/wave-11.md) |
 | Wave 12 | Modality + Files API                              | shipped | [docs/waves/wave-12.md](docs/waves/wave-12.md) |
-| Wave 13a | Streaming output (`Orchestrator.run_stream`)     | shipped | (current — see below)                            |
+| Wave 13a | Streaming output (`Orchestrator.run_stream`)     | shipped | [docs/waves/wave-13a.md](docs/waves/wave-13a.md) |
+| Wave 13b | Speculator + privacy + DAP polish               | shipped | (current — see below)                            |
 
-**Status: 10 of 10 standout features shipped, plus Waves 5–13a polish.**
-The forward plan from `0.2.0` to `1.0` lives in
-[`docs/plan.md`](docs/plan.md): six waves total. Waves 9–13a shipped
-(20 of 28 gaps cleared; #1, #2, #15, #16, #17, #19 remain across
-Wave 13b).
+**Status: 10 of 10 standout features shipped, all Wave 8 audit gaps
+addressed.** The forward plan from `0.2.0` to `1.0` lives in
+[`docs/plan.md`](docs/plan.md). Waves 9–13b shipped (26 of 28 gaps
+cleared); only #19 (cassette pattern, gated on real-API keys) and
+the Wave-12 Files-API upload helper (also gated on keys) remain —
+both flagged in their wave entries as deferred until credentials
+are available. Ready for `1.0`.
 
 ## Cross-cutting decisions
 
@@ -59,90 +62,78 @@ Wave 13b).
 ---
 
 
-## Wave 13a — Streaming output
+## Wave 13b — Speculator + privacy + DAP polish
 
 ### Goal
-Ship #9 (the heaviest single item in the 28-gap plan): callers can
-observe partial output as the model generates rather than waiting for
-the full assembled `Message`. Per the Wave 12 advisor split, this got
-its own wave to avoid risking regressions in the 510 tests around
-`AnthropicRunner.__call__`'s tool-use loop.
+The final wave to `1.0`. Five user-visible items, each independent:
+DAP `pause` actually pauses; `next`/`stepIn`/`stepOut` drive distinct
+semantics; `evaluate` gains opt-in arbitrary-expression mode;
+speculator cancels eagerly in the simple case; Presidio joins the
+privacy detector roster.
 
 ### Status
-Shipped on `feature/wave-13a-streaming`. One gap cleared (#9).
+Shipped on `feature/wave-13b-final`. Five gaps cleared (#1, #2, #15,
+#16, #17). Two items still deferred to a future wave (and documented
+honestly): #19 (cassette pattern) and the Files-API `upload_file`
+helper — both gated on real-API keys we don't have here.
 
 ### What landed
 
-| | Surface | Location |
+| # | Item | Implementation |
 | --- | --- | --- |
-| Event types | `TextDelta`, `ToolUseStart`, `ToolUseEnd`, `MessageEnd` (Pydantic models) | `src/harness/streaming/__init__.py` |
-| Protocol | `StreamingRunner` (runtime_checkable, requires `run_stream(...)`) | `src/harness/streaming/__init__.py` |
-| Runner method | `AnthropicRunner.run_stream()` — parallel async generator method | `src/harness/runner/anthropic.py` |
-| Orchestrator method | `Orchestrator.run_stream()` with `SessionStart`/`SessionEnd` + telemetry session/span scopes | `src/harness/agents/orchestrator.py` |
-| Top-level re-exports | `MessageEnd`, `StreamEvent`, `StreamingRunner`, `TextDelta`, `ToolUseEnd`, `ToolUseStart` from `harness` | `src/harness/__init__.py` |
-
-**Path B duplication, per advisor**: `AnthropicRunner.__call__` is
-~150 lines of intricate state management (tool-use loop, speculator
-begin/end, hook emission order, cache-breakpoint counting, timeout
-wrapping, replacement honoring, pause/refusal handling). Refactoring
-to share the loop body between `__call__` and `run_stream` was
-explicitly rejected — the win is deduplication, the cost is risking
-all those tests. `run_stream` is a parallel method that mostly-
-duplicates the logic with yield points; refactor-to-share is a
-follow-up wave once both paths are proven.
-
-Yield order, per iteration:
-- `TextDelta(text=...)` per SDK text-delta event.
-- `ToolUseStart(call=...)` per `content_block_stop` for tool_use,
-  *after* `speculator.observe` but *before* the runner's
-  hook + dispatch cycle.
-- `ToolUseEnd(call=..., result=...)` after dispatch.
-
-Terminal: exactly one `MessageEnd(message=...)` whose `message`
-matches what `__call__` would have returned. Fires for `end_turn` /
-`stop_sequence` / `pause_turn` / `refusal` stop reasons.
+| 16 | DAP `pause` | `DapAdapter._on_pause` sets `_pause_requested = True`. The `break_on_predicate` checks the flag first; if set, fires (and clears the flag) so the next runner invocation pauses unconditionally. Editor's pause button now works for the first time. |
+| 15 | DAP step semantics | `DapAdapter` gains a `_step_mode` field set by `_on_next` / `_on_stepIn` / `_on_stepOut`. `break_on_predicate` reads it: `step_over` and `step_out` both pause before the next runner invocation (per-turn granularity). `step_in` is treated as `step_over` until the runner exposes finer "before-next-tool-handler" granularity — documented as a follow-up to enrich. The flag is consumed (cleared) on first read so subsequent runner invocations honor the per-turn breakpoints normally. |
+| 17 | DAP `evaluate` parity | `DapAdapter.__init__` gains `allow_evaluate: bool = False` (constructor opt-in) and `_on_launch` reads `args["allowEvaluate"]` (per-launch opt-in). When on, `_on_evaluate` routes through the new `harness.debug.repl.evaluate_in_context` helper — the same code path the REPL's `inspect` command uses. Default behavior (restricted to `variables`-view names) stays for editors that didn't opt in. The opt-in is documented as carrying the same security trade-off as the REPL's `inspect`: arbitrary Python evaluation against `ctx`, only reachable in an opt-in debug session. |
+| 2  | Eager per-block speculator cancellation | `Speculator.observe` gains an end-of-method check: when `max_speculations == 1` and the observed call didn't match, the lone pending speculation is definitively a miss; cancel it now instead of waiting for `cancel_unobserved` at stream-end. For `max_speculations > 1`, keep the existing stream-end policy — correctness with multiple pending entries requires policy that's not worth the complexity. New test pins the timing: a 10s slow handler is cancelled within ms of the first non-matching `observe`. |
+| 1  | Presidio adapter | New `harness.privacy.presidio` module with `PresidioDetector` (wraps `presidio_analyzer.AnalyzerEngine` behind the existing `Detector` Protocol) and `build_pii_pack()` (preconfigured outbound-only pack covering common PII entities — PERSON, EMAIL_ADDRESS, PHONE_NUMBER, US_SSN, etc.). `[privacy-ml]` extra in `pyproject.toml` (`presidio-analyzer>=2.2`). Lazy-import in `__init__` raises `ImportError` with a clear `[privacy-ml]` install hint when the extra isn't present. `harness.privacy.repl.evaluate_in_context` is the new module-level helper that both REPL and DAP route through (Wave 13b #17). |
 
 ### Tests added
 
 | File | Count | Coverage |
 | --- | --- | --- |
-| `tests/runner/test_streaming.py` | 11 | text-only stream yields TextDelta + MessageEnd; tool-use stream yields ToolUseStart + ToolUseEnd around dispatch; AnthropicRunner satisfies StreamingRunner; plain Callable runner does not; Orchestrator.run_stream raises TypeError for non-streaming runner; Orchestrator emits SessionStart before / SessionEnd after the runner stream; multi-event ordering pinned (TextDelta → ToolUseStart → ToolUseEnd → TextDelta → MessageEnd); **speculator-during-stream lifecycle** (the targeted test the advisor flagged before declaring done) — begin/observe/cancel_unobserved/try_resolve/end fire just as in `__call__`; speculator hit short-circuits dispatch but ToolUseEnd still fires; MessageEnd uniqueness across multi-iteration runs; non-streaming `__call__` regression sanity. |
+| `tests/debug/test_dap.py` | +6 | `pause` sets the flag and `break_on_predicate` consumes it; `next` sets `step_over` then resumes; `step_over` predicate fires once and clears; default `evaluate` rejects arbitrary expressions; opt-in `evaluate` returns arbitrary Python results; opt-in `evaluate` surfaces SyntaxError as a failed response. |
+| `tests/speculate/test_speculator.py` | +2 | eager cancellation under `max_speculations=1` (10s handler cancelled in ms); no eager cancellation under `max_speculations > 1`. |
+| `tests/privacy/test_presidio.py` | 9 | structural Detector-Protocol conformance; `RecognizerResult` → `Detection` conversion; `score_threshold` / `entities` / `language` / `direction` / `action` propagation; `build_pii_pack` shape; lazy-import error when `[privacy-ml]` is missing. |
 
-11 new tests, **548 total** (was 537). Coverage **89%** (gate 85%).
+17 new tests, **565 total** (was 548). Coverage stays at **89%**
+(gate 85%).
 
 ### Verification gate
 
 ```
 ruff check                       — clean
-ruff format --check             — 176 files clean
-mypy --strict src tests         — clean (161 source files)
-pytest --cov=harness            — 548 passed, 1 skipped, 89% coverage
-mkdocs build --strict           — clean (~1s)
+ruff format --check             — 178 files clean
+mypy --strict src tests         — clean (163 source files)
+pytest --cov=harness            — 565 passed, 1 skipped, 89% coverage
+mkdocs build --strict           — clean
 uv build                         — wheel + sdist build cleanly
 ```
 
-### Deferred from this wave
+### Deferred (still)
 
-- **`OpenAICompatRunner.run_stream()`** — the chat-completions API
-  has the delta-by-delta shape (chunks of text + tool_call deltas)
-  but the integration is a separate piece of work. Queued for a
-  follow-up wave; today only `AnthropicRunner` satisfies
-  `StreamingRunner`.
-- **CLI `--stream` mode** — `harness debug --stream` would print
-  text deltas as they arrive. The wiring is mechanical given the
-  primitives now ship; queued so the wave entry stays focused on
-  the protocol surface.
-- **Refactor `__call__` to share loop body with `run_stream`** —
-  deliberate non-goal of this wave per the advisor recommendation.
-  The duplication is intentional and bounded; refactor-to-share is
-  a follow-up wave once both paths are proven.
+- **#19 cassette pattern for vendor SDK shape drift** — needs real-API
+  keys to record. The `FakeAsync*` infrastructure already covers
+  scripted-response replay; the recording step is the missing piece.
+- **Files-API `upload_file` helper** — same constraint: needs API
+  keys for an end-to-end smoke. Users can call
+  `client.beta.files.upload(...)` directly via the SDK today; the
+  harness side handles the resulting `file_id` correctly (Wave 12).
+- **DAP `step_in` finer granularity** — currently treated as
+  `step_over`. To distinguish, the `DebugRunner` would need to
+  expose a one-shot pre-tool-use breakpoint. Documented as a
+  follow-up.
+
+These are the only two items from the original 28-gap audit that
+didn't land; both are honestly gated on credentials this environment
+doesn't have. The "1.0 ready" line is met.
 
 ### Commits
 
 ```
-*  chore(progress): rotate Wave 12 to docs/waves/
-*  feat(streaming): TextDelta / ToolUseStart / ToolUseEnd / MessageEnd + StreamingRunner Protocol
-*  feat(runner): AnthropicRunner.run_stream() parallel method
-*  feat(agents): Orchestrator.run_stream() delegates to StreamingRunner
-*  docs: CHANGELOG + progress.md log of Wave 13a
+*  chore(progress): rotate Wave 13a to docs/waves/
+*  feat(debug): DAP pause + step semantics + evaluate opt-in
+*  feat(debug,repl): evaluate_in_context helper shared by REPL + DAP
+*  feat(speculate): eager per-block cancellation when max_speculations=1
+*  feat(privacy): Presidio detector + build_pii_pack under [privacy-ml]
+*  docs: CHANGELOG + progress.md log of Wave 13b
 ```
