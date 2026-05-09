@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `harness.streaming` module (Wave 13a #9) — `TextDelta`,
+  `ToolUseStart`, `ToolUseEnd`, `MessageEnd` event types and a
+  `runtime_checkable` `StreamingRunner` Protocol. Runners that
+  implement `run_stream(agent, messages) -> AsyncIterator[StreamEvent]`
+  satisfy the protocol structurally.
+- `AnthropicRunner.run_stream()` — parallel method to `__call__()`
+  that yields `TextDelta` per text-delta event, `ToolUseStart` at
+  each `content_block_stop` for `tool_use` (after speculator.observe,
+  before dispatch), `ToolUseEnd` after dispatch, and exactly one
+  terminal `MessageEnd`. Non-streaming `__call__` is untouched per
+  the advisor recommendation: parallel methods, not refactor.
+- `Orchestrator.run_stream(agent, messages)` — async generator that
+  delegates to the runner's stream after wrapping in
+  `session_scope` + `span_scope` (when telemetry is configured) and
+  emitting `SessionStart` / `SessionEnd` lifecycle hooks. Raises
+  `TypeError` if the runner doesn't implement `StreamingRunner`.
+- Top-level re-exports of `MessageEnd`, `StreamEvent`,
+  `StreamingRunner`, `TextDelta`, `ToolUseEnd`, `ToolUseStart` from
+  `harness`.
 - `harness.prompts.ImageRef` (Wave 12 #7) and `attach_image(path|url, ...)`
   helper. New `image` `ContentBlock.type` carries an `ImageRef` (base64
   bytes or URL + media_type). `AnthropicRunner` translates to
