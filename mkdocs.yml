@@ -17,6 +17,7 @@ site_dir: site
 # silences the "pages exist but are not in nav" warning at build time.
 exclude_docs: |
   waves/
+  /plan.md
 
 theme:
   name: material
@@ -58,7 +59,16 @@ plugins:
 
 nav:
   - Home: index.md
+  - Quickstart: quickstart.md
   - Architecture: architecture.md
+  - Cookbook:
+      - Overview: cookbook/index.md
+      - Redact PII: cookbook/redact-pii.md
+      - Replay evaluation: cookbook/replay-evaluation.md
+      - Debug a trajectory: cookbook/debug-a-trajectory.md
+      - Fuzz a tool: cookbook/fuzz-a-tool.md
+      - Cache + speculate: cookbook/cache-and-speculate.md
+      - Observability with OTel: cookbook/observability.md
   - CLI: cli.md
   - Modules:
       - tools: modules/tools.md
@@ -80,8 +90,9 @@ nav:
       - debug: modules/debug.md
       - speculate: modules/speculate.md
       - streaming: modules/streaming.md
+  - Comparison: comparison.md
+  - FAQ: faq.md
   - Roadmap: roadmap.md
-  - Path to 1.0: plan.md
 
 markdown_extensions:
   - admonition
