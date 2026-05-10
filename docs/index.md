@@ -47,27 +47,36 @@ small.
 
 ```python
 import asyncio
-from harness import (
-    Dispatcher, Tool, HookRunner, Orchestrator,
-    SubAgent, EchoRunner,
-)
+
 from pydantic import BaseModel
+
+from harness import (
+    CannedRunner, Dispatcher, HookRunner, Orchestrator,
+    SubAgent, Tool, text,
+)
+
 
 class GreetIn(BaseModel):
     name: str
 
+
 def greet(args: GreetIn) -> str:
     return f"Hello, {args.name}!"
 
-dispatcher = Dispatcher([
-    Tool(name="greet", description="Say hello.", input_model=GreetIn, handler=greet),
-])
-runner = EchoRunner()
-orchestrator = Orchestrator(dispatcher, HookRunner(), runner)
 
-agent = SubAgent(name="demo", system_prompt="", model="echo")
-asyncio.run(orchestrator.run(agent, [...]))
+dispatcher = Dispatcher(
+    [Tool(name="greet", description="Say hello.", input_model=GreetIn, handler=greet)]
+)
+runner = CannedRunner(replies=["Hello back!"])  # no API key needed
+orchestrator = Orchestrator(dispatcher, HookRunner(), runner)
+agent = SubAgent(name="demo", system_prompt="", model="canned")
+
+reply = asyncio.run(orchestrator.run(agent, [text("user", "hi")]))
+print(reply.content[0].text)
 ```
+
+That's a runnable program. The [Quickstart](quickstart.md) walks
+through it line by line, then upgrades the runner to real Anthropic.
 
 For runnable end-to-end examples per module, see the
 [`examples/`](https://github.com/dr-gareth-roberts/harness-engineering/tree/main/examples)
@@ -75,13 +84,27 @@ directory. Each example is also a smoke-tested entry in CI.
 
 ## Where to read next
 
-- [**Architecture**](architecture.md) — how the modules fit together,
-  and which seams are designed to swap out.
-- [**CLI**](cli.md) — the `harness` subcommands (`debug`, `cache-audit`,
-  `--dap`).
-- [**Modules**](modules/tools.md) — per-module reference (auto-generated
-  from docstrings).
-- [**Roadmap**](roadmap.md) — what's been shipped and what's next.
+If you're evaluating the library:
+
+- [**Quickstart**](quickstart.md) — 10 minutes to a working agent
+  (`CannedRunner` first, real Anthropic second).
+- [**Comparison**](comparison.md) — where harness sits relative to
+  LangChain / DSPy / AutoGen / CrewAI. Honest placement, not a
+  takedown.
+- [**Cookbook**](cookbook/index.md) — concrete recipes: redact PII,
+  replay a session, debug a bad trajectory, fuzz a tool, cache +
+  speculate, observability with OpenTelemetry.
+
+If you're building on it:
+
+- [**Architecture**](architecture.md) — the protocol seams (`Runner`,
+  `Sink`, `MemoryStore`) and the composition pattern.
+- [**CLI**](cli.md) — `harness debug`, `harness debug --dap`,
+  `harness cache-audit`.
+- [**Modules**](modules/tools.md) — per-module reference, with
+  use-cases / examples / gotchas / API ref for each.
+- [**FAQ**](faq.md) — common pitfalls and "why does X behave that way?"
+- [**Roadmap**](roadmap.md) — what's shipped, what's deferred.
 
 ## Building the docs locally
 
