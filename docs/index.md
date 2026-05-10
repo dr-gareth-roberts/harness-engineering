@@ -1,11 +1,11 @@
 # harness-engineering
 
 Reusable building blocks for the layer around an LLM — the
-"harness" that turns a model into an agent. Eighteen modules covering
+"harness" that turns a model into an agent. Nineteen modules covering
 tool dispatch, prompts, hooks, policies, runners, memory, replay,
 behavioral contracts, privacy, plans, fuzzing, causal attribution,
-prefix-cache drift, an interactive debugger, and speculative tool
-execution.
+prefix-cache drift, an interactive debugger, speculative tool
+execution, and event-streaming output.
 
 ## Install
 
@@ -24,6 +24,7 @@ Optional extras pull in heavier dependencies on demand:
 | `[otel]` | `OpenTelemetrySink` for emitting telemetry events to an OTel collector. |
 | `[fuzz]` | Hypothesis-based tool/agent fuzzers. |
 | `[attribute]` | `EmbeddingSimilarity` (sentence-transformers) for causal attribution. |
+| `[privacy-ml]` | `PresidioDetector` (Microsoft Presidio NLP-backed PII detection). |
 | `[docs]` | MkDocs + mkdocs-material + mkdocstrings to build this site locally. |
 
 ## Why "harness"?

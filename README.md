@@ -117,21 +117,28 @@ uv run mypy          # type-check (strict)
 
 ## Roadmap
 
+The full per-wave decision log lives in
+[`progress.md`](progress.md); the forward plan from where the
+codebase is today is in [`docs/plan.md`](docs/plan.md). All ten
+standout features from the original design plus the four post-1.0
+follow-up waves (CI/CD, observability, modality, streaming) are
+shipped; see the [docs site](docs/) for the per-module API reference.
+
 Currently deferred (PRs welcome):
 
-- **Speculative tool execution** — predict the next likely tool call from
-  recent trajectory and pre-execute it while the model is still generating;
-  cancel on miss, return the cached result on hit. Needs a runner streaming
-  refactor (the runner kwargs `speculator` are already wired, structurally
-  typed `object | None`).
-- **ML-based privacy detection** — Microsoft Presidio / AWS Comprehend
-  adapters under the existing `Detector` protocol; v1 is regex + entropy.
-- **Eager per-block speculator cancellation** — today an unmatched
-  speculation gets cancelled at stream-end (after the model is done
-  speaking). A future refinement could cancel mid-stream when a single
-  emitted `tool_use` makes the speculation definitively a miss; the
-  protocol shape (`observe()` per block) leaves room for it without
-  breaking changes.
+- **Vendor cassette tests** — recorded Anthropic / OpenAI sessions
+  replayed in CI to catch SDK shape drift. Needs a one-time recording
+  step against the real APIs, gated on credentials.
+- **Anthropic Files API upload helper** — `harness.prompts.attach_file(file_id=...)`
+  works today; the convenience `upload_file(client, path) -> file_id`
+  helper is deferred for the same credential reason.
+- **`OpenAICompatRunner.run_stream()`** — `AnthropicRunner.run_stream()`
+  ships; OpenAI's chat-completions streaming has a different
+  delta-by-delta shape and is queued for a follow-up.
+- **DAP `step_in` finer granularity** — currently treated as
+  `step_over` because the underlying `DebugRunner` doesn't yet
+  expose a one-shot pre-tool-use breakpoint surface. Tracking as
+  follow-up work in `docs/plan.md`.
 
 ## License
 
