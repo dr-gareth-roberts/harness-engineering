@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-05-10
+
+The "ready for 1.0" release. All ten standout features from
+`designs/standout.md` shipped (`0.2.0`), plus six post-`0.2` waves
+(9–13b) addressing the Wave-8 audit gaps. Public surface is
+considered stable from this release; subsequent breaking changes
+will go through the standard semver deprecation cycle.
+
 ### Added
 
 - `harness.privacy.PresidioDetector` (Wave 13b #1) under the new
@@ -205,6 +213,7 @@ allow/deny policies (`harness.policy`), agents and orchestrator
 sandbox (`harness.sandbox`), deterministic replay
 (`harness.replay.ReplayRunner`).
 
-[Unreleased]: https://github.com/dr-gareth-roberts/harness-engineering/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dr-gareth-roberts/harness-engineering/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v1.0.0
 [0.2.0]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v0.2.0
 [0.0.1]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v0.0.1
