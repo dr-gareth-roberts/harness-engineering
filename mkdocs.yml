@@ -18,6 +18,7 @@ site_dir: site
 exclude_docs: |
   waves/
   /plan.md
+  /docs-fix-plan.md
 
 theme:
   name: material
