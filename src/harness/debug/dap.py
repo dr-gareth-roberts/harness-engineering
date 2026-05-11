@@ -29,10 +29,16 @@ DAP subset implemented:
   continue, next, stepIn, stepOut, pause, terminate, disconnect.
 - Events: initialized, stopped, continued, output, terminated, exited.
 
-`next`, `stepIn`, `stepOut`, `pause` are accepted but treated as
-"continue" — agent trajectories don't have a meaningful intra-turn
-step granularity. The handlers exist so editors that rely on these
-capabilities don't error out.
+Stepping and pause (Wave 13b): `next` and `stepIn` both set
+`_step_mode = "step_over"` — the runner resumes from the current
+breakpoint and `break_on_predicate` auto-fires again at the next
+runner invocation (typically the next iteration of the tool-use
+loop). `stepOut` sets `_step_mode = "step_out"`, which currently has
+the same per-turn granularity as step-over; a richer "skip remaining
+tool calls until end_turn" granularity is a follow-up. `pause` sets
+`_pause_requested` so `break_on_predicate` fires unconditionally at
+the next opportunity, making the editor's pause button responsive
+mid-trajectory.
 
 `evaluate` is limited to looking up the same fields the `variables`
 view exposes (`turn_index`, `message_count`, `last_call.name`,

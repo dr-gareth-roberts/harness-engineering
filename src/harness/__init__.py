@@ -31,7 +31,20 @@ from harness.debug import (
     DebugRunner,
 )
 from harness.fuzz import FuzzReport, fuzz_agent, fuzz_tool, harness_property
-from harness.hooks import HookRunner
+from harness.hooks import (
+    Event,
+    HookDecision,
+    HookRunner,
+    PauseTurn,
+    PostAssistantMessage,
+    PostToolUse,
+    PreToolUse,
+    PromptSubmit,
+    Refusal,
+    SessionEnd,
+    SessionStart,
+    Stop,
+)
 from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
 from harness.plan import (
     Plan,
@@ -49,11 +62,20 @@ from harness.privacy import (
     PrivacyViolation,
     RegexDetector,
 )
-from harness.prompts import Message
+from harness.prompts import (
+    Message,
+    assistant_tool_use,
+    attach_file,
+    attach_image,
+    compact,
+    text,
+    user_tool_result,
+)
 from harness.replay import (
     DeleteTurn,
     DiffMatrix,
     DiffOutlier,
+    EvalCase,
     InsertTurn,
     Mutation,
     ReplaceToolResult,
@@ -80,7 +102,7 @@ from harness.streaming import (
     ToolUseEnd,
     ToolUseStart,
 )
-from harness.telemetry import JSONLSink, MemorySink, Telemetry
+from harness.telemetry import JSONLSink, MemorySink, MultiSink, Telemetry
 from harness.tools import Dispatcher, Tool
 
 if TYPE_CHECKING:
@@ -113,9 +135,12 @@ __all__ = [
     "DriftReport",
     "EchoRunner",
     "EntropyDetector",
+    "EvalCase",
+    "Event",
     "FileFingerprintStore",
     "FileStore",
     "FuzzReport",
+    "HookDecision",
     "HookRunner",
     "InMemoryStore",
     "InsertTurn",
@@ -126,6 +151,7 @@ __all__ = [
     "MemorySink",
     "Message",
     "MessageEnd",
+    "MultiSink",
     "Mutation",
     "OpenAICompatRunner",
     "OpenTelemetrySink",
@@ -133,13 +159,19 @@ __all__ = [
     "PII_PACK",
     "PathPolicy",
     "PathScope",
+    "PauseTurn",
     "Plan",
     "PlanGuardedRunner",
     "PlanViolation",
     "PlannedToolCall",
+    "PostAssistantMessage",
+    "PostToolUse",
+    "PreToolUse",
     "PrefixWatcher",
     "PrivacyBoundary",
     "PrivacyViolation",
+    "PromptSubmit",
+    "Refusal",
     "RegexDetector",
     "ReplaceToolResult",
     "ReplayRunner",
@@ -147,8 +179,11 @@ __all__ = [
     "SECRET_PACK",
     "SequencePredictor",
     "Session",
+    "SessionEnd",
     "SessionRecord",
+    "SessionStart",
     "Speculator",
+    "Stop",
     "StreamEvent",
     "StreamingRunner",
     "SubAgent",
@@ -159,9 +194,13 @@ __all__ = [
     "ToolUseStart",
     "Violation",
     "__version__",
+    "assistant_tool_use",
     "attach_contracts",
+    "attach_file",
+    "attach_image",
     "attribute",
     "check",
+    "compact",
     "compare_sessions",
     "counterfactual",
     "diff_eval",
@@ -172,6 +211,8 @@ __all__ = [
     "run_eval",
     "safe_subprocess_run",
     "scrub_env",
+    "text",
+    "user_tool_result",
 ]
 
 
