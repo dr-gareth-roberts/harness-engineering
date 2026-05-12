@@ -29,58 +29,95 @@ You have a recorded agent trajectory. You want to:
 
 ```python
 import asyncio
+from pathlib import Path
 
-from harness import Orchestrator, ReplayRunner, SessionRecord, SubAgent, text
+from harness import (
+    Dispatcher, HookRunner, Orchestrator, ReplayRunner,
+    SessionRecord, text,
+)
 
-# `SessionRecord.from_jsonl(...)` works the same way; `MemoryStore`
-# is the production interface for fetching by session_id.
-record = SessionRecord.model_validate_json(open("session.json").read())
-runner = ReplayRunner.from_record(record)
+record = SessionRecord.model_validate_json(
+    Path("session.json").read_text()
+)
+replay = ReplayRunner.from_record(record)
 
-orchestrator = Orchestrator(runner=runner, dispatcher=record.dispatcher_or_empty(), hooks=...)
-asyncio.run(orchestrator.run(record.agent, record.messages[:2]))  # whatever prefix you want
+# ReplayRunner is input-blind: it returns the recorded assistant
+# messages in order. Wire it behind an Orchestrator with whatever
+# dispatcher / hooks you want for the test. The bare Orchestrator
+# below does not re-dispatch tool calls — wire a real Dispatcher
+# if your test needs handlers to fire.
+orchestrator = Orchestrator(Dispatcher([]), HookRunner(), replay)
+reply = asyncio.run(
+    orchestrator.run(record.agent, [text("user", "any prompt")])
+)
+print(reply.content[0].text)
 ```
 
 ### Batch evaluate
 
 ```python
-from harness import EvalCase, run_eval
+from harness import (
+    AnthropicRunner, Dispatcher, EvalCase, HookRunner, Orchestrator,
+    SubAgent, run_eval,
+)
 
 cases = [
     EvalCase(name="weather-berlin", prompts=["What's the weather in Berlin?"]),
-    EvalCase(name="weather-tokyo", prompts=["What's the weather in Tokyo?"]),
-    EvalCase(name="rude-prompt",   prompts=["Insult me."]),
+    EvalCase(name="weather-tokyo",  prompts=["What's the weather in Tokyo?"]),
+    EvalCase(name="rude-prompt",    prompts=["Insult me."]),
 ]
 
-result = await run_eval(
-    runner=AnthropicRunner(...),
-    agent=SubAgent(name="weather", system_prompt="", model="claude-opus-4-7", allowed_tools=["weather"]),
-    cases=cases,
+agent = SubAgent(
+    name="weather",
+    system_prompt="",
+    model="claude-opus-4-7",
+    allowed_tools=["weather"],
 )
-print(result.summary())  # cases x outcomes table
+orchestrator = Orchestrator(
+    dispatcher,                              # your Dispatcher
+    HookRunner(),
+    AnthropicRunner(dispatcher, HookRunner()),
+)
+
+results = await run_eval(cases, orchestrator=orchestrator, agent=agent)
+for r in results:
+    last = r.record.messages[-1]
+    print(f"{r.case.name:20s} {r.duration_ms:6.0f}ms  {last.role}")
 ```
+
+`run_eval` returns a `list[EvalResult]`; each element carries the
+case, the produced `SessionRecord`, and a duration. There is no
+built-in scorer — your grading is whatever assertion you want to run
+over `r.record.messages`.
 
 ### Cross-provider differential matrix
 
 ```python
-from harness import diff_eval, AnthropicRunner, OpenAICompatRunner
+from harness import AnthropicRunner, OpenAICompatRunner, diff_eval
 
 matrix = await diff_eval(
-    cases=cases,
-    runners={
-        "anthropic":   AnthropicRunner(...),
-        "openai":      OpenAICompatRunner(...),
-        "local_llama": OpenAICompatRunner(..., base_url="http://localhost:11434/v1"),
-    },
+    cases,
     agent=agent,
+    runners={
+        "anthropic":   AnthropicRunner(dispatcher, HookRunner()),
+        "openai":      OpenAICompatRunner(dispatcher, HookRunner()),
+        "local_llama": OpenAICompatRunner(
+            dispatcher, HookRunner(),
+            base_url="http://localhost:11434/v1",
+        ),
+    },
+    dispatcher=dispatcher,
 )
 
-# Find the cases where exactly one runner disagrees with the others.
+# Each entry pairs one dissenting runner with the consensus cluster.
 for outlier in matrix.outliers():
-    print(f"{outlier.case_name}: {outlier.dissenter} dissents from {outlier.majority}")
+    print(
+        f"{outlier.case.name}: {outlier.dissenting_runner} dissents from "
+        f"{outlier.consensus_runners}"
+    )
 
-# Render an HTML report for review.
-matrix.write_html("./eval-report.html")
+# Render a static HTML report for review.
+matrix.report_html("./eval-report.html")
 ```
 
 The HTML report shows per-case responses side-by-side, with cluster
@@ -96,28 +133,34 @@ from harness import counterfactual, RewriteTurn
 
 forked = await counterfactual(
     record,
-    mutation=RewriteTurn(turn_index=2, new_text="Be more concise."),
-    runner=AnthropicRunner(...),
+    RewriteTurn(index=2, new_message=text("user", "Be more concise.")),
+    AnthropicRunner(dispatcher, HookRunner()),
+    orchestrator,
 )
-# `forked` is the divergent SessionRecord starting at turn 2.
+# `forked` is a fresh SessionRecord whose messages are the original
+# prefix up to and including the rewritten turn, plus one new
+# continuation produced by the live runner above.
 ```
 
 Mutations available: `RewriteTurn`, `ReplaceToolResult`, `InsertTurn`,
-`DeleteTurn`. Compose them however you want.
+`DeleteTurn`. Each is a frozen dataclass with primitive fields, so
+they serialize alongside the session and the counterfactual is
+reproducible.
 
 ## Gotchas
 
 - **Tool call IDs vary across providers** — Anthropic generates
   `toolu_01...`, OpenAI generates `call_...`. `compare_sessions` and
-  `diff_eval` ignore IDs in the comparison so cross-provider diffs
+  `diff_eval` strip IDs in their comparisons so cross-provider diffs
   stay meaningful.
-- **Replay is exact** — if your test re-creates the same dispatcher,
-  the replay runs through the same handler dispatches. If you want
-  the model's text but not the side effects, mark tools idempotent
-  and use `MemoryStore.snapshot` to fork.
+- **`ReplayRunner` is input-blind** — it returns the recorded
+  assistant messages in order regardless of the inputs you feed
+  into the orchestrator. Tool handlers fire only if the recorded
+  messages contain tool_use blocks *and* you wire ReplayRunner into
+  something that dispatches them (a bare Orchestrator does not).
 - **`diff_eval` runs runners in parallel** via `asyncio.gather`.
-  Wall time approx slowest runner times cases. If one runner is
-  much slower, consider running it separately.
+  Wall time ≈ slowest_runner × len(cases). Exceptions per
+  (case, runner) are captured so the matrix stays rectangular.
 - **HTML reports are static** — they don't pull live data. Re-run
   to refresh.
 

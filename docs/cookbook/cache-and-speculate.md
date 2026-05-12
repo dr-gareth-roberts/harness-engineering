@@ -45,8 +45,11 @@ runner = AnthropicRunner(
 Drift events fire silently. To audit them in batch:
 
 ```bash
-uv run harness cache-audit ./cache-prints --window-hours 24
+uv run harness cache-audit --store ./cache-prints --since 24h
 ```
+
+`--since` accepts `24h`, `7d`, `30m`, `2w` forms. `--store` may be
+either the JSONL file or the directory it lives in.
 
 Output: a unified-diff per drift, so you can see exactly which
 characters of your "stable" system prompt changed:
@@ -72,7 +75,7 @@ API call, file read), pre-execute the likely next call in parallel
 with the model's generation. On hit, you skip the handler runtime
 entirely. On miss, the speculation is cancelled — at stream-end at
 the latest, eagerly inside `observe()` for the simple
-`max_speculations=1` case (Wave 13b #2).
+`max_speculations=1` case.
 
 ```python
 from harness import LastCallPredictor, Speculator
@@ -135,13 +138,13 @@ other; the runner has zero runtime dependency on either.
   tool idempotent only if re-running with the same args is observably
   equivalent to running it once.
 - **Cache breakpoints cap at 4** in Anthropic. The runner enforces
-  this client-side (Wave 10 #12) so you get a typed
+  this client-side, so you get a typed
   `CacheBreakpointLimitExceeded` instead of an opaque API 400.
-- **`PrefixWatcher.audit` only surfaces drift, not "why."** The
+- **`harness cache-audit` only surfaces drift, not "why."** The
   unified diff shows you what changed; you still have to fix the
   source.
 - **Speculator + streaming** — the speculator API is honored in
-  both `__call__` and `run_stream` (Wave 13a). The "before dispatch"
+  both `__call__` and `run_stream`. The "before dispatch"
   cancellation timing is preserved.
 
 ## Related

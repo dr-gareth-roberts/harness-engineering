@@ -54,8 +54,8 @@ dispatcher = Dispatcher(
 
 report = asyncio.run(
     fuzz_tool(
-        dispatcher=dispatcher,
-        tool_name="parse",
+        dispatcher,
+        "parse",
         n=50,         # 50 examples
         seed=0,       # deterministic; same seed → same examples
     )
@@ -63,7 +63,11 @@ report = asyncio.run(
 
 print(f"{report.passed}/{report.total} passed")
 for failure in report.failures:
-    print(f"  input={failure.input!r}  result={failure.result!r}  exc={failure.exception!r}")
+    print(
+        f"  input={failure.input!r}  "
+        f"result={failure.result!r}  "
+        f"exc={failure.exception!r}"
+    )
 ```
 
 A typical run will surface `count=0` as a divide-by-zero (Hypothesis
@@ -74,59 +78,74 @@ hits the boundary deterministically). The report contains structured
 ## Agent-level invariant fuzzing
 
 For checking properties of *the assistant's response* given fuzzed
-inputs:
+inputs, give `fuzz_agent` the tool whose `input_model` to fuzz and
+an invariant over the assistant `Message`:
 
 ```python
 from harness.fuzz import fuzz_agent
-from harness.prompts import Message
+from harness.prompts.messages import Message
 
-async def invariant(reply: Message) -> bool:
+def invariant(reply: Message) -> bool:
     """The agent's reply must mention the city we asked about."""
-    return any("Berlin" in (b.text or "") for b in reply.content)
+    return any(
+        block.type == "text" and "Berlin" in (block.text or "")
+        for block in reply.content
+    )
 
-await fuzz_agent(
-    orchestrator=orchestrator,
-    agent=agent,
-    input_model=WeatherQuery,
-    invariant=invariant,
+report = await fuzz_agent(
+    orchestrator,
+    agent,
+    "weather",           # tool_name registered on the dispatcher
     n=20,
+    invariant=invariant,
+    seed=0,
 )
 ```
 
+The user message embeds the generated `tool.input_model` payload by
+default; pass `prompt_template=lambda example: ...` to customise.
+
 ## pytest integration
 
-Use the `harness_property` decorator for property-based tests:
+Use the `harness_property` decorator for property-based tests. It
+takes the dispatcher and the tool *name* (not the input model):
 
 ```python
 from harness.fuzz import harness_property
+from harness.tools.schema import ToolCall
 
-@harness_property(input_model=ParseIn, n=100, seed=0)
-async def test_parse_never_raises(args):
-    result = await dispatcher.dispatch(ToolCall(name="parse", arguments=args.model_dump()))
-    assert result.is_error is False, f"raised on {args}"
+@harness_property(dispatcher=dispatcher, tool="parse", n=100, seed=0)
+async def parse_never_errors(payload):
+    result = await dispatcher.dispatch(
+        ToolCall(name="parse", arguments=payload.model_dump())
+    )
+    assert result.is_error is False, f"errored on {payload}"
 ```
 
 Hypothesis settings ship sensible defaults: `derandomize=True`,
 `database=None` (so CI runs are reproducible without a shared
-example DB), no deadline (long handlers don't trip the default 200ms
-limit).
+example DB), no deadline (long handlers don't trip the default
+200 ms limit).
 
 ## Gotchas
 
-- **Hypothesis strategies for complex types** — the bridge handles
-  primitive types, `Optional`, `Literal`, `list[X]`, basic `dict`.
-  For exotic types (custom validators, `RootModel` wrappers, etc.),
-  pass `overrides={"field_name": custom_strategy}` to inject a
-  hand-built Hypothesis strategy.
+- **The strategy bridge is small.** It covers `str`, `int`, `float`,
+  `bool`, and `Optional[X]` / `X | None`, plus the
+  `annotated_types` constraints from `Field` (`min_length`,
+  `max_length`, `ge`, `le`). Anything else — `list[X]`, `dict`,
+  nested models, `Literal`, `Decimal`, `datetime` — raises
+  `FuzzStrategyUnsupported`. Use `overrides={"field": strategy}`
+  to plug a hand-built `hypothesis.strategies` strategy.
 - **Determinism is per-seed**, not per-test-run. `seed=0` always
   generates the same sequence; if you want different examples,
   bump the seed.
-- **Failures may be reduced** — Hypothesis automatically shrinks
-  failing inputs to their minimum form. `failure.input` is the
-  shrunk version, not the original generated one.
-- **`fuzz_agent` runs real model calls** unless your `runner` is a
-  fake. For CI, gate behind a `--fuzz-real-runner` flag and use
-  `CannedRunner` / `EchoRunner` by default.
+- **Failures are not shrunk.** Hypothesis only runs the
+  `generate` phase here, so `failure.input` is the exact input
+  the generator produced — useful for surfacing edge cases, but
+  not minimised.
+- **`fuzz_agent` runs the orchestrator's runner per example.** Give
+  the orchestrator a `CannedRunner` or `EchoRunner` for routine CI
+  runs; gate real-model runs behind an explicit flag.
 
 ## Related
 
