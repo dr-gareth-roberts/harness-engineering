@@ -34,7 +34,7 @@ try:
 except ImportError as exc:
     raise ImportError(
         "harness.runner.openai_compat requires the openai SDK. "
-        "Install with: pip install 'harness-engineering[openai-compat]'"
+        "Install with: pip install 'harness-engineering-toolkit[openai-compat]'"
     ) from exc
 
 from harness.agents.definition import SubAgent

@@ -271,7 +271,7 @@ def test_missing_openai_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setitem(sys.modules, "openai", None)
     monkeypatch.delitem(sys.modules, "harness.runner.openai_compat", raising=False)
 
-    with pytest.raises(ImportError, match=r"harness-engineering\[openai-compat\]"):
+    with pytest.raises(ImportError, match=r"harness-engineering-toolkit\[openai-compat\]"):
         importlib.import_module("harness.runner.openai_compat")
 
 

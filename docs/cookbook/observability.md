@@ -29,7 +29,7 @@ turn-span as `parent_span_id`. You can group / filter on
 Install:
 
 ```bash
-uv add 'harness-engineering[otel]'
+uv add 'harness-engineering-toolkit[otel]'
 ```
 
 ```python

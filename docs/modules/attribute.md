@@ -51,7 +51,7 @@ print(f"would have made {result.estimated_calls} runner calls")
 For embedding-based similarity:
 
 ```bash
-uv add 'harness-engineering[attribute]'
+uv add 'harness-engineering-toolkit[attribute]'
 ```
 
 ```python

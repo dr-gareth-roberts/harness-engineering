@@ -33,7 +33,7 @@ try:
 except ImportError as exc:
     raise ImportError(
         "harness.runner.anthropic requires the anthropic SDK. "
-        "Install with: pip install 'harness-engineering[anthropic]'"
+        "Install with: pip install 'harness-engineering-toolkit[anthropic]'"
     ) from exc
 
 from harness.agents.definition import SubAgent

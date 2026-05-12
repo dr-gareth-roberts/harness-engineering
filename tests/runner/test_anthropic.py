@@ -255,7 +255,7 @@ def test_missing_anthropic_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setitem(sys.modules, "anthropic", None)
     monkeypatch.delitem(sys.modules, "harness.runner.anthropic", raising=False)
 
-    with pytest.raises(ImportError, match=r"harness-engineering\[anthropic\]"):
+    with pytest.raises(ImportError, match=r"harness-engineering-toolkit\[anthropic\]"):
         importlib.import_module("harness.runner.anthropic")
 
 

@@ -12,12 +12,12 @@ return deterministic responses without any model. The
 [Quickstart](quickstart.md) builds a working agent on
 `CannedRunner` first, then upgrades to Anthropic if you want.
 
-### Why is `pip install harness-engineering` so small?
+### Why is `pip install harness-engineering-toolkit` so small?
 
 Because the base dependency is `pydantic>=2.6`. Vendor SDKs and
 heavy libraries (Anthropic, OpenAI, Hypothesis, sentence-transformers,
 OpenTelemetry, Presidio) are *opt-in extras*. If you need Anthropic,
-`pip install 'harness-engineering[anthropic]'`. If you need privacy
+`pip install 'harness-engineering-toolkit[anthropic]'`. If you need privacy
 ML, `[privacy-ml]`. The full list is on the [Home](index.md) page.
 
 ### Which runner should I use?

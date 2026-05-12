@@ -23,7 +23,7 @@ resulting assistant message.
 Install the extra:
 
 ```bash
-uv add 'harness-engineering[fuzz]'
+uv add 'harness-engineering-toolkit[fuzz]'
 ```
 
 ## Working code

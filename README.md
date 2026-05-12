@@ -45,7 +45,20 @@ The "harness" is everything around the model: prompt assembly, tool wiring, perm
 
 ## Install
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11+.
+
+```bash
+pip install harness-engineering-toolkit
+# or
+uv add harness-engineering-toolkit
+```
+
+The distribution name on PyPI is `harness-engineering-toolkit`
+(the shorter `harness-engineering` is held by an unrelated package).
+The importable module is `harness`, so user code is unaffected:
+`from harness import Orchestrator, Tool, …`.
+
+For local development, clone the repo and:
 
 ```bash
 uv sync --extra dev

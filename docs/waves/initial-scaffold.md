@@ -24,7 +24,7 @@ summarization-based compaction strategy that uses the runner for its summary cal
 - Shipped. PR #1 commits `87…` (TBD on push) — see Implementation log.
 
 ### Decisions
-- **Vendor namespace.** Anthropic-specific code lives in `harness.runner.anthropic`. The base package keeps zero non-Pydantic deps; `anthropic` is an optional extra (`pip install harness-engineering[anthropic]`). Other vendors can land alongside (`harness.runner.openai`, etc.) without churn.
+- **Vendor namespace.** Anthropic-specific code lives in `harness.runner.anthropic`. The base package keeps zero non-Pydantic deps; `anthropic` is an optional extra (`pip install harness-engineering-toolkit[anthropic]`). Other vendors can land alongside (`harness.runner.openai`, etc.) without churn.
 - **Manual tool loop, not the SDK tool runner.** Our `Tool` already carries an explicit Pydantic input model and `json_schema()` returns Anthropic-shaped tool definitions. A manual loop lets the runner reuse the existing `Dispatcher` (validation, error wrapping) and fire `PreToolUse`/`PostToolUse` hooks around each call — both lost if we delegate to `client.beta.messages.tool_runner()`.
 - **Streaming by default.** Per the `claude-api` skill, "default to streaming for any request that may involve long input, long output, or high `max_tokens`." Use `client.messages.stream()` + `get_final_message()` so we never have to hand-handle SSE events; the SDK accumulates state for us. `max_tokens` defaults to `16_000` (under the SDK's no-stream guard) and can go higher when streaming.
 - **Adaptive thinking on by default for Opus 4.7 / 4.6 / Sonnet 4.6.** The skill is explicit: `thinking: {type: "adaptive"}` for "anything remotely complicated", with `effort` controlling depth. Older models would need `thinking: {type: "enabled", budget_tokens: N}` — out of scope for MVP. Default model becomes `claude-opus-4-7` (the skill's mandated default).
@@ -62,7 +62,7 @@ The runner is the only module that imports `anthropic`. Everything else stays ve
 
 **New:**
 - `src/harness/runner/__init__.py` — re-export `AnthropicRunner` (guarded import).
-- `src/harness/runner/anthropic.py` — `AnthropicRunner` class + message/tool translators. Top-of-module `try: import anthropic except ImportError: raise ImportError("install harness-engineering[anthropic]") from None`.
+- `src/harness/runner/anthropic.py` — `AnthropicRunner` class + message/tool translators. Top-of-module `try: import anthropic except ImportError: raise ImportError("install harness-engineering-toolkit[anthropic]") from None`.
 - `tests/runner/__init__.py`
 - `tests/runner/test_anthropic.py` — unit tests with a fake client.
 - `tests/runner/fakes.py` — `FakeAsyncAnthropic` and helpers to script tool-use loops.
@@ -185,7 +185,7 @@ Returns: kept system messages + a synthesised `system`-role summary message + la
 5. **`max_iterations` cap.** Fake keeps returning `tool_use` → runner raises `RuntimeError` after the configured cap.
 6. **`allowed_tools` filter.** Tools not in `agent.allowed_tools` are not sent to the API, even if they're registered in the dispatcher.
 7. **Cache marker propagation.** A harness `ContentBlock(cache=True)` becomes `cache_control={"type":"ephemeral"}` on the rendered API block.
-8. **Missing dep error.** Use `monkeypatch.setitem(sys.modules, "anthropic", None)` + `importlib.reload(harness.runner.anthropic)` so the test runs deterministically whether or not the extra is installed in CI. Asserts the raised `ImportError` mentions `harness-engineering[anthropic]`.
+8. **Missing dep error.** Use `monkeypatch.setitem(sys.modules, "anthropic", None)` + `importlib.reload(harness.runner.anthropic)` so the test runs deterministically whether or not the extra is installed in CI. Asserts the raised `ImportError` mentions `harness-engineering-toolkit[anthropic]`.
 
 `tests/prompts/test_compaction.py`:
 - Add 3 tests for `summarize_compact`: keeps system + last N + injects summary; honours `keep_system=False`; calls the runner exactly once.

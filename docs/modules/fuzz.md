@@ -18,7 +18,7 @@ generated inputs into a property-based test.
 ## Quick example
 
 ```bash
-uv add 'harness-engineering[fuzz]'
+uv add 'harness-engineering-toolkit[fuzz]'
 ```
 
 ```python

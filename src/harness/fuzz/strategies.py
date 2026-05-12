@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 _FUZZ_EXTRA_MESSAGE = (
     "harness.fuzz requires the `hypothesis` package. "
-    "Install with: pip install 'harness-engineering[fuzz]'"
+    "Install with: pip install 'harness-engineering-toolkit[fuzz]'"
 )
 
 

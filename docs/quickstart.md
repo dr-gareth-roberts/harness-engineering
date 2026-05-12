@@ -14,9 +14,9 @@ If you finish step 1, you've already built something runnable.
 
 <!--pytest.mark.skip-->
 ```bash
-uv add harness-engineering
+uv add harness-engineering-toolkit
 # or
-pip install harness-engineering
+pip install harness-engineering-toolkit
 ```
 
 That gives you the core (Pydantic-only). Vendor SDKs and heavy
@@ -105,7 +105,7 @@ Add the optional Anthropic extra:
 
 <!--pytest.mark.skip-->
 ```bash
-uv add 'harness-engineering[anthropic]'
+uv add 'harness-engineering-toolkit[anthropic]'
 export ANTHROPIC_API_KEY=...
 ```
 
@@ -136,7 +136,7 @@ OpenAI works the same way:
 
 <!--pytest.mark.skip-->
 ```bash
-uv add 'harness-engineering[openai-compat]'
+uv add 'harness-engineering-toolkit[openai-compat]'
 ```
 
 <!--pytest.mark.skip-->

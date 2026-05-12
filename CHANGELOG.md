@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-05-13
+
+**First public PyPI release.** Renames the distribution from
+`harness-engineering` to `harness-engineering-toolkit` because the
+former is already owned by an unrelated package on PyPI (uploaded
+2026-04-28 by a different maintainer). The 1.0.0 and 1.0.1 tags
+exist on GitHub but never published to PyPI — `1.0.2` is therefore
+the first version anyone can `pip install`.
+
+The importable module name remains `harness`. User code does not
+change; only the install command does.
+
+### Changed
+
+- Distribution name: `harness-engineering` → `harness-engineering-toolkit`.
+- Install commands across the docs / cookbook / README / source-side
+  error messages (`AnthropicRunner`, `OpenAICompatRunner`, fuzz
+  imports) updated to reference the new name. Tests that assert on
+  the error string text updated to match.
+- `pyproject.toml` `name` field updated; everything else
+  (dependencies, extras, console-script entry point) unchanged.
+
+### Migration
+
+There is nothing to migrate. The 1.0.x tags before this release
+were never on PyPI, so any prior `pip install harness-engineering`
+would have hit a different package altogether (the same one that
+holds the name today). To install this library, use:
+
+```bash
+pip install harness-engineering-toolkit
+uv add harness-engineering-toolkit
+```
+
 ## [1.0.1] — 2026-05-12
 
 Trust-erosion fix release. A post-1.0.0 audit (run by Codex against
@@ -315,7 +349,8 @@ allow/deny policies (`harness.policy`), agents and orchestrator
 sandbox (`harness.sandbox`), deterministic replay
 (`harness.replay.ReplayRunner`).
 
-[Unreleased]: https://github.com/dr-gareth-roberts/harness-engineering/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/dr-gareth-roberts/harness-engineering/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v1.0.2
 [1.0.1]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v1.0.1
 [1.0.0]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v1.0.0
 [0.2.0]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v0.2.0

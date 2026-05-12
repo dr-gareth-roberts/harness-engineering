@@ -11,10 +11,15 @@ execution, and event-streaming output.
 
 <!--pytest.mark.skip-->
 ```bash
-uv add harness-engineering
+uv add harness-engineering-toolkit
 # or
-pip install harness-engineering
+pip install harness-engineering-toolkit
 ```
+
+The importable module is `harness`; the distribution name on PyPI is
+`harness-engineering-toolkit` (the shorter name was already taken by
+an unrelated package). Once installed, `from harness import …` is
+the only entry point you need.
 
 Optional extras pull in heavier dependencies on demand:
 

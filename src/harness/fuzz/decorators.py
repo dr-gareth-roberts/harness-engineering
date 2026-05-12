@@ -56,7 +56,7 @@ def harness_property(
 
                 pytest.skip(
                     "harness.fuzz requires the optional [fuzz] extra "
-                    "(install with `pip install 'harness-engineering[fuzz]'`)"
+                    "(install with `pip install 'harness-engineering-toolkit[fuzz]'`)"
                 )
 
             from harness.fuzz.runner import _generate_examples

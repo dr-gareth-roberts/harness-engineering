@@ -42,7 +42,7 @@ work with high signal-to-noise.
 | # | Item | Approach |
 | --- | --- | --- |
 | 22 | No CI/CD | `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, `mypy --strict src/harness`, `pytest`, `mkdocs build --strict`, `uv build`. Matrix on Python 3.11 / 3.12 / 3.13. Caches `.venv` between runs. Fails the PR on any red gate. |
-| 28 | No PyPI publishing | `.github/workflows/release.yml` triggered on tag `v*`. Builds wheel + sdist, runs the gate, publishes to PyPI via OIDC trusted publishing (no API token in repo). README install instructions update from "GitHub" to `pip install harness-engineering`. |
+| 28 | No PyPI publishing | `.github/workflows/release.yml` triggered on tag `v*`. Builds wheel + sdist, runs the gate, publishes to PyPI via OIDC trusted publishing (no API token in repo). README install instructions update from "GitHub" to `pip install harness-engineering-toolkit`. |
 | 23 | No GitHub Pages deployment | `.github/workflows/docs.yml` builds the MkDocs site on push to `main`, deploys via `peaceiris/actions-gh-pages`. Pages source set to the `gh-pages` branch. README links to the public URL. |
 | 24 | No CHANGELOG.md | `CHANGELOG.md` at repo root following Keep-a-Changelog format. Pre-fill with `0.2.0` (everything in `progress.md` distilled to user-facing one-liners) and `0.0.1` (the MVP). Future PRs add entries under `Unreleased`. |
 | 25 | No CONTRIBUTING.md | `CONTRIBUTING.md` at repo root. Sections: dev setup (`uv sync --extra dev`), running the gate (`pytest`, `mypy`, `ruff`), running the docs (`uv sync --extra docs && uv run mkdocs serve`), commit conventions (imperative mood, no emoji, conventional-commits-style scope), PR expectations (focused, reviewable, gated). |
@@ -53,7 +53,7 @@ work with high signal-to-noise.
 ### Acceptance
 
 - A PR with a deliberate failing test or mypy error is rejected by CI before any reviewer looks at it.
-- `pip install harness-engineering` (or `uv add`) installs `0.2.0` from PyPI.
+- `pip install harness-engineering-toolkit` (or `uv add`) installs `0.2.0` from PyPI.
 - The docs are at `https://dr-gareth-roberts.github.io/harness-engineering/` (or wherever Pages is configured) and update on each `main` push.
 - A new contributor can clone, run `uv sync --extra dev`, run `pytest` and `mkdocs serve`, and have everything Just Work, with explicit instructions for it.
 - Security disclosures have a documented intake path.

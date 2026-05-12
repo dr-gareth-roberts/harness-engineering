@@ -35,7 +35,7 @@ runner = boundary.wrap(inner)
 Switch to NLP-backed:
 
 ```bash
-uv add 'harness-engineering[privacy-ml]'
+uv add 'harness-engineering-toolkit[privacy-ml]'
 ```
 
 ```python
