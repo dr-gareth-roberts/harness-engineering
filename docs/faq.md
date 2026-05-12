@@ -92,12 +92,11 @@ if you can defend that promise.
 
 ### Can a hook modify what the model sees?
 
-Yes. Wave 10 #5 added `HookDecision.replacement`. Returning
-`HookDecision(replacement=ToolResult(...))` from a `PreToolUse` hook
-short-circuits dispatch with the supplied result; from a
-`PostToolUse` hook, it rewrites the result before it goes back to
-the model. Typical use: redact a secret in the result before the
-model retains it.
+Yes. Returning `HookDecision(replacement=ToolResult(...))` from a
+`PreToolUse` hook short-circuits dispatch with the supplied result;
+from a `PostToolUse` hook, it rewrites the result before it goes
+back to the model. Typical use: redact a secret in the result
+before the model retains it.
 
 ### Can hooks be async?
 
@@ -121,21 +120,36 @@ side.
 
 ### What direction is the boundary scanning?
 
-The pre-built packs (`SECRET_PACK`, `PII_PACK`, `HIPAA_PACK`,
-`build_pii_pack()`) default to **outbound-only** — "don't leak
-user data to the provider." For inbound scanning ("don't trust
-what the model returns"), set `direction="inbound"` or `"both"` on
-the detector.
+It depends on the pack — the defaults match each pack's threat model:
+
+- `SECRET_PACK` (AWS / Anthropic / GitHub / Stripe tokens) defaults
+  to `direction="both"`, `action="block"`. Secrets crossing the
+  boundary in *either* direction is almost always a bug, so the
+  pack stops the call rather than silently redacting.
+- `PII_PACK` (US SSN / phone / email) defaults to
+  `direction="outbound"`, `action="redact"`. PII is more often a
+  content issue than a security one; redaction keeps the model
+  usable.
+- `HIPAA_PACK` (MRN / NPI / ICD-10) defaults to
+  `direction="outbound"`, `action="redact"` (ICD-10 is
+  `action="audit"` because legitimate clinical text contains it).
+
+Each detector exposes `direction` (`"outbound"` / `"inbound"` /
+`"both"`) and `action` (`"block"` / `"redact"` / `"audit"`); flip
+them if your threat model differs.
 
 ## Replay and testing
 
 ### Do replayed sessions hit the real API?
 
-No. `ReplayRunner.from_record(record)` returns the recorded
-assistant messages without any API call. The dispatch path *does*
-re-run your tool handlers (so `SessionRecord` doesn't need to store
-tool result content), unless you've marked the tools idempotent and
-use a fork pattern.
+No. `ReplayRunner.from_record(record)` is input-blind: it returns
+the recorded assistant messages in order, with no API call and no
+tool dispatch of its own. Tool handlers only fire if the recorded
+messages contain `tool_use` blocks *and* you wrap ReplayRunner in
+something that actually dispatches them — a bare Orchestrator does
+not. The recorded `tool_result` messages are part of the playback,
+so the model side of the trajectory replays faithfully without
+needing the handlers to run again.
 
 ### Can I run pytest without the optional extras installed?
 
@@ -171,11 +185,13 @@ to enable. Same security trade-off as the REPL's `inspect` command
 
 ### `step_in` doesn't go into the tool handler — why?
 
-Today, `step_in` aliases `step_over`. Agent trajectories don't
-have a meaningful "step into the tool handler" granularity yet
-(the runner doesn't expose a one-shot pre-tool-use breakpoint
-surface). Tracked as a follow-up; `next` and `stepOut` work as
-expected.
+Today, `step_in` uses the same per-turn `step_over` semantics: the
+runner resumes from the current breakpoint and pauses again at the
+next break opportunity (typically the next iteration of the
+tool-use loop). A finer "step into the tool handler" granularity
+needs a one-shot pre-tool-use breakpoint that the DebugRunner
+doesn't yet expose — tracked as a follow-up. `next`, `pause`, and
+`stepOut` all behave per-turn for the same reason.
 
 ## Speculator
 
@@ -203,8 +219,9 @@ non-idempotent speculation.
 
 Yes. The speculator API (`begin` / `observe` / `cancel_unobserved`
 / `try_resolve` / `end`) is honored in both `Runner.__call__` and
-`run_stream`. Wave 13a's streaming method preserves the same
-cancellation timing.
+`run_stream`. The streaming path preserves the same cancellation
+timing — eager per-block cancellation when
+`max_speculations == 1`, end-of-stream cleanup otherwise.
 
 ## Telemetry
 

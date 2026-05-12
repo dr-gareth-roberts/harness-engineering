@@ -73,6 +73,13 @@ the REPL), source, continue, next, stepIn, stepOut, pause, terminate,
 disconnect; events: initialized, stopped, continued, output,
 terminated, exited.
 
+Stepping semantics: `next` and `stepIn` both run until the next
+break opportunity (typically the next iteration of the tool-use
+loop). `stepOut` is the same per-turn granularity today — a finer
+"skip remaining tool calls until end-of-turn" granularity is on the
+roadmap. `pause` is honored mid-trajectory: the next break check
+fires unconditionally and the runner stops at the next opportunity.
+
 ## `harness cache-audit`
 
 Audit a fingerprint store for prefix-cache drift over a window of
@@ -81,8 +88,13 @@ form so you can tell *what* changed in the prompt prefix that
 invalidated the prompt cache.
 
 ```bash
-harness cache-audit path/to/fingerprint-store --window-hours 24
+harness cache-audit --store path/to/fingerprint-store --since 24h
 ```
+
+| Flag | Meaning |
+|---|---|
+| `--store PATH` | Required. Either the `fingerprints.jsonl` file or the directory containing it. |
+| `--since SPEC` | Audit window (default `24h`). Accepts `24h`, `7d`, `30m`, `2w`. |
 
 Backed by `harness.cache.PrefixWatcher` and a `FileFingerprintStore`.
 

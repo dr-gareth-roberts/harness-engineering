@@ -31,28 +31,29 @@ together.
 
 ## Concrete differences
 
-### vs LangChain
+### vs LangChain (and LangGraph / LangSmith)
 
 LangChain optimizes for *breadth*: every model provider, every
-vector DB, every tool, every chain pattern, all in one tree. The
-trade-off is that the abstractions tend to leak (every
-`AgentExecutor` knows about every tool calling convention) and the
-type system is loose (lots of `Dict[str, Any]`).
+vector DB, every tool, every chain pattern, all in one ecosystem.
+The modern split — **LangGraph** for typed state-machine
+orchestration, **LangSmith** for tracing and evaluation — addresses
+the historical complaints about loose types and opaque execution;
+that ecosystem is now closer to "framework you build inside" than
+"library you import primitives from."
 
-`harness-engineering` is the opposite: small protocols (`Runner`,
+`harness-engineering` sits a level lower. Small protocols (`Runner`,
 `Sink`, `MemoryStore`, `Detector`, `Predictor`), strict types
 (`mypy --strict` passes across `src/` and `tests/`), and
-vendor-specific code lives in vendor-specific files behind
-optional extras. You won't find a `harness.langchain.OpenAIToolsAgentParser`
-because the parser surface doesn't exist as a concept here. There's
-just `Runner = Callable[[SubAgent, list[Message]], Awaitable[Message]]`,
+vendor-specific code lives in vendor-specific files behind optional
+extras. There's no DSL — just
+`Runner = Callable[[SubAgent, list[Message]], Awaitable[Message]]`,
 and `AnthropicRunner` / `OpenAICompatRunner` implement it.
 
-**Pick LangChain** if you want a working chatbot in 50 lines and
-you don't mind giving up type safety. **Pick harness-engineering**
-if you want to type-check the layer between your code and the
-model, and you want to be able to swap the runner without
-rewriting your tool definitions.
+**Pick LangChain / LangGraph / LangSmith** if you want a turnkey
+ecosystem and you're comfortable adopting the framework's idioms,
+graph model, and tracing UI. **Pick harness-engineering** if you'd
+rather assemble the runtime from small protocols you can swap or
+reuse without owning the whole stack.
 
 ### vs DSPy
 
@@ -78,22 +79,21 @@ around it."
 
 ### vs AutoGen
 
-AutoGen's core abstraction is the *conversation between agents*.
-You spin up a `UserProxyAgent`, an `AssistantAgent`, maybe a
-`GroupChatManager`, and the agents talk to each other to solve a
-task. Tool dispatch, memory, orchestration patterns are all derived
-from that primitive.
+AutoGen's core abstraction is the *conversation between agents*:
+agents (and, in modern AutoGen, teams of agents) exchange messages
+to solve a task, with tool dispatch, memory, and orchestration
+patterns built on top of that primitive.
 
 `harness-engineering` doesn't have an opinion on multi-agent
-patterns. Its `Orchestrator` runs *one* sub-agent through a tool-use
-loop. If you want supervisor/worker, voting, recursive sub-agents —
-build it on top, or use AutoGen.
+patterns. Its `Orchestrator` runs *one* sub-agent through a
+tool-use loop. If you want supervisor/worker, voting, recursive
+sub-agents — build it on top, or use AutoGen.
 
-**Pick AutoGen** when the problem is naturally
-multi-agent (e.g., code review with reviewer + executor + critic).
-**Pick harness-engineering** when you want a single-agent runtime
-with serious observability, and you'll handle multi-agent
-choreography yourself if you need it.
+**Pick AutoGen** when the problem is naturally multi-agent (e.g.,
+code review with reviewer + executor + critic). **Pick
+harness-engineering** when you want a single-agent runtime with
+serious observability, and you'll handle multi-agent choreography
+yourself if you need it.
 
 ### vs CrewAI
 
@@ -135,10 +135,12 @@ Honest list, not bullet-armor:
 
 ## What `harness-engineering` is *good* at
 
-- **Reproducibility.** `ReplayRunner`, recorded `SessionRecord`s,
-  cassette-replay, deterministic fakes (`EchoRunner`,
-  `CannedRunner`). 565 tests run in under 5 seconds; the entire
-  CI matrix gates strictly.
+- **Reproducibility.** `ReplayRunner` over recorded
+  `SessionRecord`s, deterministic fakes (`EchoRunner`,
+  `CannedRunner`), counterfactual replays, and a cross-provider
+  `diff_eval` matrix. Vendor HTTP-level cassettes are not in scope
+  yet (listed as deferred on the [Roadmap](roadmap.md)). 565 tests
+  run in under 5 seconds; the entire CI matrix gates strictly.
 - **Observability you can rely on.** `Sink` Protocol with
   `JSONLSink`, `MemorySink`, `OpenTelemetrySink` (under `[otel]`).
   Trace_id / span_id correlation propagated automatically through

@@ -43,8 +43,8 @@ These are intentional gaps, not omissions:
   works today; the `upload_file(client, path) -> file_id`
   convenience helper is gated on the same credentials.
 - **`OpenAICompatRunner.run_stream()`** — `AnthropicRunner.run_stream()`
-  ships in Wave 13a; OpenAI's chat-completions streaming has a
-  different delta-by-delta shape and is queued for a follow-up.
+  ships today; OpenAI's chat-completions streaming has a different
+  delta-by-delta shape and is queued for a follow-up.
 - **DAP `step_in` finer granularity** — currently treated as
   `step_over` because `DebugRunner` doesn't yet expose a one-shot
   pre-tool-use breakpoint surface.
