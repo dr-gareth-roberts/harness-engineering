@@ -26,42 +26,55 @@ import asyncio
 from harness.fuzz import fuzz_tool
 
 report = asyncio.run(fuzz_tool(
-    dispatcher=dispatcher,
-    tool_name="parse",
+    dispatcher,
+    "parse",
     n=100,
     seed=0,
 ))
 
-print(f"{report.passed}/{report.total} passed")
+passed = report.total - len(report.failures)
+print(f"{passed}/{report.total} passed")
 for failure in report.failures:
-    print(f"  {failure.input!r} → {failure.exception or failure.result}")
+    print(f"  {failure.input!r} -> {failure.exception or failure.result}")
 ```
 
 pytest property test:
 
 ```python
 from harness.fuzz import harness_property
+from harness.tools.schema import ToolCall
 
-@harness_property(input_model=ParseIn, n=100, seed=0)
-async def test_parse_never_raises(args):
-    result = await dispatcher.dispatch(...)
+@harness_property(dispatcher=dispatcher, tool="parse", n=100, seed=0)
+async def parse_never_errors(payload):
+    result = await dispatcher.dispatch(
+        ToolCall(name="parse", arguments=payload.model_dump())
+    )
     assert result.is_error is False
 ```
 
 ## Gotchas
 
-- **Hypothesis settings are pinned for reproducibility:**
-  `derandomize=True`, `database=None`, no deadline. CI runs are
-  stable across machines.
-- **Strategy bridge handles primitives + `Optional` / `Literal` /
-  `list[X]` / basic `dict`.** Exotic types (custom validators,
-  `RootModel` wrappers) need an `overrides=` mapping with a
-  hand-built strategy.
-- **Failures are shrunk** by Hypothesis. `failure.input` is the
-  minimum input that reproduces; the original generated input
-  isn't preserved.
-- **`fuzz_agent` runs real model calls** by default. Gate behind a
-  CI flag and use `CannedRunner` / `EchoRunner` for routine fuzz.
+- **Strategy bridge handles primitives + `Optional` only.** The
+  supported types are `str`, `int`, `float`, `bool`, and
+  `Optional[X]` / `X | None`, plus the `annotated_types`
+  constraints attached by `Field` (`min_length`, `max_length`,
+  `ge`, `le`). Anything else — `list[X]`, `dict`, nested models,
+  `Literal`, `Decimal`, `datetime`, unions of two non-None types —
+  raises `FuzzStrategyUnsupported`. Pass `overrides=` with a
+  hand-built `hypothesis.strategies` strategy per such field.
+- **Hypothesis is an optional dependency.** Importing
+  `harness.fuzz` always works; the first call into `fuzz_tool` /
+  `fuzz_agent` / `pydantic_strategy` raises a structured
+  `ImportError` if `[fuzz]` isn't installed. Under pytest,
+  `harness_property` calls `pytest.skip` so missing-extra runs
+  surface cleanly.
+- **`fuzz_agent` runs real model calls** if you give it a real
+  runner. Gate behind a CI flag, or pass `CannedRunner` /
+  `EchoRunner` to the orchestrator for routine fuzz.
+- **`harness_property` consumes the dispatcher at decoration time.**
+  Pass the dispatcher and tool *name*; the wrapped function
+  receives a validated input-model instance per generated example
+  and is expected to assert whatever matters.
 
 ## Related
 

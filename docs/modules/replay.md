@@ -18,27 +18,34 @@ for cross-provider differential matrices with HTML reports.
 
 ```python
 import asyncio
+from pathlib import Path
+
 from harness import (
+    Dispatcher,
+    HookRunner,
+    Orchestrator,
     ReplayRunner,
-    SessionRecord,
-    EvalCase,
-    counterfactual,
     RewriteTurn,
+    SessionRecord,
+    counterfactual,
+    text,
 )
 
-# 1. Replay a recorded session.
-record = SessionRecord.model_validate_json(open("session.json").read())
-runner = ReplayRunner.from_record(record)
+# 1. Replay a recorded session. ReplayRunner returns the recorded
+#    assistant messages in order; it is input-blind, so wiring it
+#    behind an Orchestrator gives a deterministic playback.
+record = SessionRecord.model_validate_json(Path("session.json").read_text())
+replay = ReplayRunner.from_record(record)
+orchestrator = Orchestrator(Dispatcher([]), HookRunner(), replay)
 
-# 2. Batch evaluation. See cookbook for `run_eval` and `diff_eval`
-#    full call sites — they're imported the same way:
-#       from harness import run_eval, diff_eval
-#    cases = [EvalCase(name="t1", prompts=["..."]), ...]
-#    result = await run_eval(runner=..., agent=..., cases=cases)
+# 2. Batch evaluation and cross-provider matrices live in the
+#    cookbook — see Related below for `run_eval` and `diff_eval`.
 
-# 3. Counterfactual: what if turn 2 had said "be terse"?
-mutation = RewriteTurn(turn_index=2, new_text="Be terse.")
-forked = asyncio.run(counterfactual(record, mutation=mutation, runner=runner))
+# 3. Counterfactual: what if turn 2 had said "Be terse."?
+mutation = RewriteTurn(index=2, new_message=text("user", "Be terse."))
+forked = asyncio.run(
+    counterfactual(record, mutation, replay, orchestrator)
+)
 ```
 
 The cookbook page goes deeper:
@@ -50,10 +57,19 @@ including the HTML report.
 
 - **Tool call IDs vary across providers.** Anthropic generates
   `toolu_01...`, OpenAI generates `call_...`. The comparison
-  helpers ignore IDs so cross-provider diffs stay meaningful.
-- **`ReplayRunner` re-runs your tool handlers** by default — replay
-  is exact, including dispatches. Mark tools idempotent if you
-  want to skip side effects on replay.
+  helpers normalize them out so cross-provider diffs stay
+  meaningful.
+- **`ReplayRunner` is input-blind.** It returns the recorded
+  assistant messages in order regardless of the current dispatcher
+  state, agent, or message list. Tool handlers run only if the
+  recorded messages contain `tool_use` blocks *and* you wire
+  ReplayRunner into something that dispatches them (the bare
+  `Orchestrator` doesn't). For tests that should re-execute tool
+  handlers, drive a real runner — replay is for canned playback.
+- **`counterfactual` needs an orchestrator and a runner.** The
+  orchestrator carries `dispatcher`, `hooks`, and `telemetry`;
+  the runner you supply produces the new continuation after the
+  mutated prefix. The orchestrator's own runner is ignored.
 - **Cross-provider matrices run runners in parallel** via
   `asyncio.gather`; wall time tracks the slowest runner × cases.
   Consider running slow / expensive providers separately.

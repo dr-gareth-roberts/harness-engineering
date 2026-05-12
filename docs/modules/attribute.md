@@ -21,17 +21,31 @@ output. `JaccardSimilarity` and `LengthRatio` are zero-dep;
 import asyncio
 from harness import attribute, JaccardSimilarity
 
+# `target_message_index` points at the assistant message whose
+# content you want explained. Negative indices count from the end.
 result = asyncio.run(attribute(
-    session=record,
-    target="the secret ingredient is rosebud",   # the output you want explained
+    record,
+    target_message_index=-1,
     runner=runner,
     agent=agent,
-    granularity="block",                          # or "sentence", "paragraph"
+    granularity="block",          # "message" | "block" | "sentence"
     similarity=JaccardSimilarity(),
 ))
 
+print(f"called runner {result.actual_calls} times")
 for chunk in result.top_k(3):
-    print(f"{chunk.score:.3f}  {chunk.text!r}")
+    print(f"{chunk.score:.3f}  {chunk.preview!r}")
+```
+
+Estimate the cost before paying for it:
+
+```python
+result = asyncio.run(attribute(
+    record, -1, runner, agent,
+    granularity="block",
+    estimate_only=True,
+))
+print(f"would have made {result.estimated_calls} runner calls")
 ```
 
 For embedding-based similarity:
@@ -48,18 +62,21 @@ similarity = EmbeddingSimilarity(model_name="all-MiniLM-L6-v2")
 ## Gotchas
 
 - **Leave-one-out is O(n) re-runs** where n is chunk count.
-  Wall-time = chunk_count × runner_latency. Use coarser granularity
-  or fewer chunks if the runner is expensive.
+  Wall-time = chunk_count × runner_latency. Coarser granularity
+  or `estimate_only=True` lets you budget before committing.
 - **`JaccardSimilarity` is whitespace-tokenized lowercase.** Cheap
   and predictable, but doesn't capture semantic similarity.
   `EmbeddingSimilarity` does, at the cost of model loading +
   inference.
-- **The `target` is matched as a substring of the assistant
-  response by default.** Pass `target_match="exact"` if you want
-  exact equality.
-- **Ablation re-runs your tool handlers** unless `ReplayRunner` is
-  the runner. For idempotent handlers this is fine; for side-
-  effecting ones, use replay.
+- **Target text is read from the record, not regenerated.** The
+  original assistant response at `target_message_index` is the
+  anchor; ablation runs are compared against it. We never re-run
+  the original session.
+- **Whatever `runner` does, ablation does N+1 times.** A real
+  vendor runner will dispatch tool handlers per call; a
+  `ReplayRunner` just returns canned assistant messages with no
+  dispatch. Pair attribution with `ReplayRunner.from_record(...)`
+  for cost-free re-runs over already-recorded outputs.
 
 ## Related
 

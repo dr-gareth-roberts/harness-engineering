@@ -1,10 +1,11 @@
 # `harness.sandbox`
 
-`PathScope` + `PathPolicy` for filesystem-scoped tool calls and
-`safe_subprocess_run` with a scrubbed environment and timeout.
-Keeps sandbox concerns out of the tool handlers themselves — your
-handler asks the scope to resolve a path and gets a typed error if
-it's outside the allow set.
+`PathScope` for resolving caller-supplied paths against an allow /
+deny set, `PathPolicy` for blocking `PreToolUse` events whose path
+arguments fall outside scope, and `safe_subprocess_run` for shelling
+out with a scrubbed env and a wall-clock timeout. Sandbox concerns
+stay out of the tool handlers — they ask the scope to validate a
+path and get either a real `Path` back or a typed error.
 
 ## When to reach for this
 
@@ -18,38 +19,57 @@ it's outside the allow set.
 ## Quick example
 
 ```python
-from harness import PathPolicy, PathScope, safe_subprocess_run, scrub_env
+from harness import (
+    HookRunner, PathPolicy, PathScope, PreToolUse,
+    safe_subprocess_run, scrub_env,
+)
 
 # 1. Scope file access to a workspace dir.
-scope = PathScope(roots=["./workspace"], policy=PathPolicy.READ_WRITE)
+scope = PathScope.of(allow=["./workspace"])
 
 def read_file(args):
-    p = scope.resolve(args.path)  # raises if outside roots
+    # validate() resolves the path symlink-aware and raises
+    # PathDenied if it falls outside the allow set.
+    p = scope.validate(args.path)
     return p.read_text()
 
-# 2. Shell out safely.
-result = safe_subprocess_run(
+# 2. (Optional) wire the same scope into a PreToolUse hook handler
+#    that blocks calls to listed tools when their `path` argument is
+#    outside the scope. Catches escapes before the handler runs.
+hooks = HookRunner()
+hooks.register(
+    PreToolUse,
+    PathPolicy.of(scope, tool_names={"read_file", "write_file"}),
+)
+
+# 3. Shell out safely. `safe_subprocess_run` is async.
+result = await safe_subprocess_run(
     ["uv", "run", "pytest", "-q"],
     cwd="./workspace",
     timeout=30,
     env=scrub_env(),  # only the variables you allowlist
 )
+print(result.returncode, result.duration_ms)
 ```
 
 ## Gotchas
 
-- **`PathScope.resolve` is the only safe path method** — direct
-  `Path(...)` construction inside a handler bypasses the scope.
-  Always call `scope.resolve(user_supplied)` first.
-- **`safe_subprocess_run` is sync.** Wrap with
-  `asyncio.to_thread(...)` if you're calling from an async context
-  and the subprocess is long-running.
-- **`scrub_env` is allowlist-based.** Pass `keep=` with the env
-  vars your subprocess actually needs (e.g., `PATH`); everything
-  else is dropped.
-- **`PathPolicy.READ_ONLY` + `scope.resolve(write_path)`** raises;
-  the scope decides whether the operation is allowed before the
-  Path object is exposed.
+- **`PathScope.validate` is the gate** — direct `Path(...)`
+  construction inside a handler bypasses the scope. Always call
+  `scope.validate(user_supplied)` first. `is_allowed(path)` is the
+  predicate variant when you want to branch rather than raise.
+- **`safe_subprocess_run` is async** — `await` it; don't expect a
+  sync return. The child is spawned via `create_subprocess_exec`,
+  so there's no shell layer and `cmd` quoting is not a risk.
+- **`scrub_env` is allowlist-based.** The kwarg is `allow_keys=`
+  (iterable of env var names). The default is `DEFAULT_ALLOWED_ENV_KEYS`
+  — `PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `LC_ALL`.
+  Everything else (`ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, …)
+  is dropped before reaching the child.
+- **`PathScope` is advisory.** Between `is_allowed()` returning
+  True and the caller opening the path, a concurrent symlink swap
+  (TOCTOU) can redirect. Use OS-level isolation if real safety
+  matters.
 
 ## Related
 

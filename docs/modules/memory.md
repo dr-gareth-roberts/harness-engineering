@@ -17,20 +17,21 @@ turn.
 ## Quick example
 
 ```python
-from harness import FileStore, Session, SubAgent, text
+from harness import FileStore, Session, SubAgent
 
 store = FileStore("./sessions")  # one JSON file per session_id
-session = Session(
-    store=store,
-    agent=SubAgent(name="bot", system_prompt="", model="claude", allowed_tools=[]),
-)
+agent = SubAgent(name="bot", system_prompt="", model="canned", allowed_tools=[])
+# `orchestrator` is your Orchestrator from harness.agents.
+session = Session(orchestrator, agent, store)
 
-# Run a turn — Session snapshots after each one.
-await session.run(orchestrator, [text("user", "Hello")])
-await session.run(orchestrator, [text("user", "Tell me more")])
+# `send()` runs one turn: appends the user message, calls the
+# orchestrator, appends the reply, snapshots to the store.
+await session.send("Hello")
+await session.send("Tell me more")
 
-# Later — load it back.
-record = await store.load(session.id)
+# Later — load it back. `load()` may return None if the id is unknown.
+record = await store.load(session.session_id)
+assert record is not None
 print(f"{len(record.messages)} messages")
 ```
 
@@ -45,10 +46,13 @@ print(f"{len(record.messages)} messages")
 - **`FileStore` writes one file per session_id**. For high-cardinality
   workloads, consider a custom SQLite-backed store implementing
   `MemoryStore`.
-- **`Session.run` snapshots after every turn** — fine for normal
+- **`Session.send` snapshots after every call** — fine for normal
   loops, expensive if the conversation is large and you're calling
   in a tight loop. Snapshot manually with `store.save(record)` if
   you need finer control.
+- **Single-writer per session_id.** Two `Session.restore(same_id)`
+  instances racing `send()` is last-writer-wins. Treat each
+  `Session` as owned by a single coroutine.
 
 ## Related
 
