@@ -9,6 +9,7 @@ execution, and event-streaming output.
 
 ## Install
 
+<!--pytest.mark.skip-->
 ```bash
 uv add harness-engineering
 # or
@@ -108,6 +109,7 @@ If you're building on it:
 
 ## Building the docs locally
 
+<!--pytest.mark.skip-->
 ```bash
 uv sync --extra docs
 uv run mkdocs serve

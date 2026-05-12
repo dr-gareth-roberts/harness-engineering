@@ -12,6 +12,7 @@ If you finish step 1, you've already built something runnable.
 
 ## Install
 
+<!--pytest.mark.skip-->
 ```bash
 uv add harness-engineering
 # or
@@ -90,6 +91,7 @@ asyncio.run(main())
 
 Run it:
 
+<!--pytest.mark.skip-->
 ```bash
 uv run python tour.py
 ```
@@ -101,6 +103,7 @@ You'll see the canned reply print. The CannedRunner is deterministic
 
 Add the optional Anthropic extra:
 
+<!--pytest.mark.skip-->
 ```bash
 uv add 'harness-engineering[anthropic]'
 export ANTHROPIC_API_KEY=...
@@ -108,6 +111,7 @@ export ANTHROPIC_API_KEY=...
 
 Swap the runner:
 
+<!--pytest.mark.skip-->
 ```python
 from harness import AnthropicRunner
 
@@ -130,10 +134,12 @@ tool-use schema, runs the loop, and returns the final assistant
 
 OpenAI works the same way:
 
+<!--pytest.mark.skip-->
 ```bash
 uv add 'harness-engineering[openai-compat]'
 ```
 
+<!--pytest.mark.skip-->
 ```python
 from harness import OpenAICompatRunner
 runner = OpenAICompatRunner(dispatcher, hooks)  # OpenAI default
@@ -179,6 +185,7 @@ The runner you just swapped is one seam. Here's what's already wired:
 Each of those is a wrapper around the same `Runner` you wrote in
 Step 2. Composition is the model:
 
+<!--pytest.mark.skip-->
 ```python
 DebugRunner(                             # adds breakpoints
     PlanGuardedRunner(                   # enforces a plan-as-contract

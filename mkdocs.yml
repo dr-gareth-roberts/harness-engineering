@@ -101,5 +101,15 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
+  # Enables `--8<--` snippet embedding so cookbook pages can render a
+  # block from `examples/*.py` directly. The example file lives once,
+  # is smoke-tested by `tests/examples/test_examples_run.py`, and the
+  # docs render the same canonical text — no chance of doc/source
+  # drift on embedded snippets.
+  - pymdownx.snippets:
+      base_path:
+        - .
+        - examples
+      check_paths: true
   - toc:
       permalink: true

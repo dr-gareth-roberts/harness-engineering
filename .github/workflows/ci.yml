@@ -67,6 +67,14 @@ jobs:
         # The `fail_under = 85` threshold there gates on a drop.
         run: uv run pytest -q --cov=harness
 
+      - name: pytest --codeblocks (docs gate)
+        # Extracts and runs the runnable Python blocks in the showcase
+        # docs pages. Non-runnable blocks (bash, illustrative sketches,
+        # snippets referencing undefined names) carry an explicit
+        # `<!--pytest.mark.skip-->` comment immediately above them.
+        # Catches doc/source API drift before readers do.
+        run: uv run pytest --codeblocks docs/quickstart.md docs/index.md
+
       - name: mkdocs build (strict)
         run: uv run mkdocs build --strict
 
