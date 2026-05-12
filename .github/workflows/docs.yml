@@ -25,6 +25,14 @@ permissions:
   pages: write
   id-token: write
 
+# See ci.yml — without this, `uv run` re-syncs and drops the
+# previously-installed `--extra docs` (mkdocs disappears between
+# steps). `UV_PYTHON` pins which Python `uv run` uses so it doesn't
+# fall back to `.python-version` (3.11) and recreate the venv.
+env:
+  UV_NO_SYNC: "1"
+  UV_PYTHON: "3.12"
+
 jobs:
   build:
     name: build site

@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-05-12
+
+Trust-erosion fix release. A post-1.0.0 audit (run by Codex against
+the rendered docs site) caught extensive doc/source API drift across
+quickstart, the module pages, and the cookbook recipes — examples
+invoked constructors with kwargs the source didn't accept, called
+methods that didn't exist, and described semantics that no longer
+matched the runtime. Each fix in this release was written after
+reading the canonical source and running the rewritten snippet
+end-to-end; the showcase pages are now CI-gated against future
+regressions of the same kind.
+
+No runtime API changes. The library's public surface is unchanged
+between 1.0.0 and 1.0.1.
+
+### Added
+
+- Top-level re-exports of names the docs already documented as
+  importable from `harness` but which were only reachable via the
+  submodule paths: `text`, `attach_file`, `attach_image`, `compact`,
+  `assistant_tool_use`, `user_tool_result` (from `harness.prompts`);
+  `Event`, `HookDecision`, `PreToolUse`, `PostToolUse`,
+  `PostAssistantMessage`, `SessionStart`, `SessionEnd`,
+  `PromptSubmit`, `Stop`, `PauseTurn`, `Refusal` (from
+  `harness.hooks`); `EvalCase` (from `harness.replay`); `MultiSink`
+  (from `harness.telemetry`).
+- `pytest-codeblocks` CI step (`pytest --codeblocks
+  docs/quickstart.md docs/index.md`) — every fenced Python block on
+  the showcase pages is now executed in CI. Catches doc/source
+  drift before readers do.
+- `pymdownx.snippets` mkdocs extension enabled, so cookbook recipes
+  can embed canonical code from `examples/*.py` via `--8<--` syntax;
+  the example files are smoke-tested by
+  `tests/examples/test_examples_run.py`.
+
+### Fixed
+
+- **Quickstart and home page** — all imports now resolve against the
+  real top-level surface.
+- **`docs/modules/memory.md`** — `Session(orchestrator, agent, store)`
+  is the real ctor; `session.send(...)` and `session.session_id` are
+  the real methods. The page previously described an invented
+  `Session(store=, agent=)` shape and a non-existent `session.run`.
+- **`docs/modules/plan.md`** — `PlannedToolCall` takes `tool_name`,
+  `arguments_match`, `arguments_regex`; `mode` lives on `Plan`, not
+  on `PlanGuardedRunner`. Documents all three modes (`strict` /
+  `superset` / `subset`).
+- **`docs/modules/sandbox.md`** — `PathScope.of(allow=[...])` builds
+  a scope; `scope.validate(path)` is the gate. `PathPolicy` is a
+  `PreToolUse` hook policy, not an enum. `safe_subprocess_run` is
+  async. `scrub_env` uses `allow_keys=` (not `keep=`).
+- **`docs/modules/replay.md`** — `ReplayRunner` is input-blind: it
+  returns canned assistant messages and does not re-run tool
+  handlers itself. `RewriteTurn(index=, new_message=)` is the real
+  shape. `counterfactual(session, mutation, runner, orchestrator)`
+  requires an orchestrator.
+- **`docs/modules/fuzz.md`** — strategy bridge covers primitives +
+  `Optional` only; `list`, `dict`, `Literal`, nested models all
+  raise `FuzzStrategyUnsupported`. `harness_property` is keyed by
+  `(dispatcher, tool)`, not `input_model`. Failures are not
+  shrunk.
+- **`docs/modules/attribute.md`** — `target_message_index` (int) is
+  the anchor; granularity is `"message" | "block" | "sentence"`.
+  Drops the invented `target=` / `target_match=` API.
+- **`docs/cookbook/replay-evaluation.md`** — the batch eval helper
+  takes `(cases, orchestrator=, agent=)` and returns
+  `list[EvalResult]`. `DiffOutlier` exposes `.case`,
+  `.dissenting_runner`, `.consensus_runners`. `matrix.report_html(path)`
+  (not `write_html`).
+- **`docs/cookbook/fuzz-a-tool.md`** — `fuzz_agent` takes the
+  `tool_name`, not `input_model`. The bridge support claim is
+  honest about what it covers.
+- **`docs/cookbook/cache-and-speculate.md`** — `harness cache-audit
+  --store PATH --since 24h` is the real CLI; the previous
+  `--window-hours` flag did not exist.
+- **`docs/cli.md`** — cache-audit flags table corrected; the
+  `harness debug` page now describes the real Wave 13b stepping /
+  pause semantics.
+- **`docs/faq.md`** — `SECRET_PACK`'s posture is
+  `direction="both"`, `action="block"`; the prior outbound-only
+  claim was wrong. Replay-handler answer aligns with `ReplayRunner`'s
+  actual input-blind behaviour. Step / pause / step-out answers
+  match the DAP source.
+- **`docs/comparison.md`** — softens the LangChain framing to
+  acknowledge LangGraph + LangSmith; drops outdated AutoGen class
+  names; removes vendor-cassette replay from the strengths list
+  (it is explicitly deferred on the roadmap).
+- **`SECURITY.md`** — supported-versions table now reflects the
+  post-1.0 reality (1.0.x current).
+- **`src/harness/debug/dap.py`** — module docstring no longer
+  claims `next` / `stepIn` / `stepOut` / `pause` are "treated as
+  continue"; Wave 13b wired the real step semantics months ago.
+- **CI / Release / Docs workflows** — set `UV_NO_SYNC=1` at the
+  workflow level. Recent uv versions (~0.5) re-derive the project's
+  default dependency set on every `uv run` invocation and remove
+  anything the prior `uv sync --extra ...` step installed; without
+  this env var the gate failed before reaching the build step, the
+  Pages deploy could not find `mkdocs`, and the trusted-publisher
+  release step never got the chance to run. The local gate (which
+  invokes the binaries directly out of `.venv/bin/`) was unaffected,
+  which is how the issue went unnoticed.
+
 ## [1.0.0] — 2026-05-10
 
 The "ready for 1.0" release. All ten standout features from
@@ -213,7 +315,8 @@ allow/deny policies (`harness.policy`), agents and orchestrator
 sandbox (`harness.sandbox`), deterministic replay
 (`harness.replay.ReplayRunner`).
 
-[Unreleased]: https://github.com/dr-gareth-roberts/harness-engineering/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/dr-gareth-roberts/harness-engineering/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v1.0.1
 [1.0.0]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v1.0.0
 [0.2.0]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v0.2.0
 [0.0.1]: https://github.com/dr-gareth-roberts/harness-engineering/releases/tag/v0.0.1

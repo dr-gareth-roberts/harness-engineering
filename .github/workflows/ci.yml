@@ -16,6 +16,21 @@ concurrency:
 permissions:
   contents: read
 
+# Tell `uv run` not to auto-sync. Without this, recent uv versions
+# (~0.5) re-derive the project's default dependency set on every
+# `uv run` invocation and remove anything the previous `uv sync
+# --extra ...` step installed — so `ruff`, `mypy`, `pytest`, and
+# `mkdocs` all vanish between steps. With `UV_NO_SYNC=1`, the
+# explicit `uv sync --extra ...` step is the single source of truth
+# for what's in the venv, and `uv run` only resolves the executable.
+#
+# `UV_PYTHON` is set per-step in the matrix; without it, `uv run`
+# falls back to the project's `.python-version` (3.11) instead of
+# the matrix's Python, which would force a venv recreate on every
+# `uv run` invocation and re-introduce the same drop-the-extras bug.
+env:
+  UV_NO_SYNC: "1"
+
 jobs:
   gate:
     name: gate (py${{ matrix.python }})
@@ -24,6 +39,11 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13"]
+    env:
+      # Without this, `uv run` falls back to `.python-version` (3.11)
+      # and recreates the venv on the 3.12 / 3.13 matrix slots — which
+      # also clears the extras that `uv sync` just installed.
+      UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v4
 

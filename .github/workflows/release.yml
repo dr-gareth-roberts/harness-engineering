@@ -25,6 +25,15 @@ on:
 permissions:
   contents: read
 
+# See ci.yml — without this, `uv run` re-syncs and drops the
+# previously-installed extras (ruff / mypy / pytest / mkdocs all
+# vanish between steps, and the gate fails before the build can
+# happen). `UV_PYTHON` pins which Python `uv run` uses so it doesn't
+# fall back to `.python-version` (3.11) and recreate the venv.
+env:
+  UV_NO_SYNC: "1"
+  UV_PYTHON: "3.12"
+
 jobs:
   gate:
     # Re-run the same gate CI runs, against the tagged commit. Don't
@@ -68,9 +77,11 @@ jobs:
       name: pypi
       url: https://pypi.org/p/harness-engineering
     permissions:
-      # Required for OIDC trusted publishing. `contents: read` from
-      # the workflow-level default carries through; this is the
-      # additional permission the publish action needs.
+      # Once a job specifies any permission, all other permissions reset
+      # to `none` — the workflow-level `contents: read` default no longer
+      # applies. Without `contents: read` here, `actions/checkout@v4`
+      # fails with "Repository not found" before OIDC ever gets to run.
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4

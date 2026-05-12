@@ -110,7 +110,7 @@ if TYPE_CHECKING:
     from harness.runner.openai_compat import OpenAICompatRunner
     from harness.telemetry.otel import OpenTelemetrySink
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = [
     "AllowList",
