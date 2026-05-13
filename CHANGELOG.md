@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **DAP stepping prose synced to 1.3.0 source.** Removed the
+  "DAP `step_in` finer granularity" deferred bullet from
+  `README.md` and `docs/roadmap.md` — Wave 13b's `_step_mode`
+  flag plus `DapAdapter.attach_hooks(...)` already wire
+  frame-aware `stepIn` / `stepOut`. Rewrote the stepping section
+  in `docs/cli.md`, the FAQ `next` / `stepIn` / `stepOut` answer,
+  and `docs/modules/debug.md`'s pre-1.x limitation note to match
+  `src/harness/debug/dap.py:33-69`. `progress.md`'s Wave 13b
+  "Deferred (still)" list dropped the same item and gained a
+  short note pointing at the 1.3.0 audit batch.
+- **Public-facing version vocabulary.** Replaced internal
+  intermediate-release labels (1.1.0, 1.2.0, M3.5, M3.6) with
+  1.3.0 in `docs/cookbook/debug-a-trajectory.md`,
+  `docs/cookbook/observability.md`, `docs/faq.md`, and
+  `docs/modules/telemetry.md`. The collapsed-release model
+  (per CHANGELOG [1.3.0]) means those internal labels never
+  shipped to PyPI; user-visible docs now reference only the
+  versions in this CHANGELOG.
+- **Roadmap / Comparison counts refreshed.** `docs/roadmap.md`
+  and `docs/comparison.md` now report 866 tests / 90% coverage
+  (gate 88%) / 173 source files, matching the current state of
+  `pytest --cov` and the repo.
+- **SECURITY.md supported-versions table** moved from 1.0.x to
+  1.3.x as current; the 6-month-backport example updated
+  accordingly.
+- **docs/architecture.md source-tree listing** gained the
+  `streaming/` module (shipped in Wave 13a).
+- **docs/modules/telemetry.md** codeblock gate failures fixed:
+  the `async with telemetry.session_scope(...)` snippet now
+  carries a `pytest.mark.skip` marker with reason, and the
+  `OpenTelemetrySink(tracer=...)` snippet gained the missing
+  `from harness.telemetry import OpenTelemetrySink` import so it
+  is runnable.
+- **docs/modules/cache.md** quick-example footer comment now
+  invokes `harness cache-audit --store PATH --since 24h` instead
+  of the long-removed `--window-hours N` flag. Cookbook and CLI
+  reference were already correct in 1.0.1; the modules page had
+  drifted out of sync.
+
 ## [1.3.0] — 2026-05-13
 
 Production-quality batch driven by a multi-pass audit

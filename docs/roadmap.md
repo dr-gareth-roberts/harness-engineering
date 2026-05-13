@@ -26,11 +26,12 @@ in the repo root. This page summarizes the current state.
 
 10 of 10 standout features from the original `designs/standout.md`
 are shipped. **All actionable Wave-8 audit gaps cleared.** Tests:
-**565 passing, 89% coverage**; mypy strict clean across `src/` and
-`tests/` (163 source files); `ruff` + `ruff format --check` clean;
-`mkdocs build --strict` clean; `uv build` produces a clean wheel +
-sdist; CI matrix runs Python 3.11 / 3.12 / 3.13 with PyPI publishing
-via OIDC trusted publishing on tag push.
+**866 passing, 90% coverage** (gate at 88%); mypy strict clean
+across `src/` and `tests/` (173 source files); `ruff` + `ruff
+format --check` clean; `mkdocs build --strict` clean; `uv build`
+produces a clean wheel + sdist; CI matrix runs Python 3.11 / 3.12
+/ 3.13 with PyPI publishing via OIDC trusted publishing on tag
+push.
 
 ## Deferred
 
@@ -45,9 +46,6 @@ These are intentional gaps, not omissions:
 - **`OpenAICompatRunner.run_stream()`** — `AnthropicRunner.run_stream()`
   ships today; OpenAI's chat-completions streaming has a different
   delta-by-delta shape and is queued for a follow-up.
-- **DAP `step_in` finer granularity** — currently treated as
-  `step_over` because `DebugRunner` doesn't yet expose a one-shot
-  pre-tool-use breakpoint surface.
 
 ## Archive
 

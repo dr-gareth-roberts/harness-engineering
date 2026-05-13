@@ -139,15 +139,15 @@ Honest list, not bullet-armor:
   `SessionRecord`s, deterministic fakes (`EchoRunner`,
   `CannedRunner`), counterfactual replays, and a cross-provider
   `diff_eval` matrix. Vendor HTTP-level cassettes are not in scope
-  yet (listed as deferred on the [Roadmap](roadmap.md)). 565 tests
-  run in under 5 seconds; the entire CI matrix gates strictly.
+  yet (listed as deferred on the [Roadmap](roadmap.md)). 866 tests
+  run in under 10 seconds; the entire CI matrix gates strictly.
 - **Observability you can rely on.** `Sink` Protocol with
   `JSONLSink`, `MemorySink`, `OpenTelemetrySink` (under `[otel]`).
   Trace_id / span_id correlation propagated automatically through
   the orchestrator and dispatcher. Your existing OTel backend
   works without custom code.
 - **Type safety.** `mypy --strict` passes across `src/` and `tests/`
-  (163 source files at 1.0). Tools are Pydantic, hooks are typed,
+  (173 source files at 1.3). Tools are Pydantic, hooks are typed,
   protocols are explicit. Refactors don't silently break the world.
 - **Pluggable everything.** Every seam is a `Protocol` — `Runner`,
   `Sink`, `MemoryStore`, `Detector`, `Predictor`. Drop in your own;

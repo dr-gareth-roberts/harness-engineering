@@ -136,14 +136,14 @@ orchestrator = Orchestrator(dispatcher, hooks, debug)
   want the model to also run, don't mutate.
 - **`abort()` raises `DebugAborted`** — catch it at the orchestrator
   level if you want graceful shutdown.
-- **DAP `step_in` semantics (1.2.0+)** — as of M3.6, `stepIn` is a
-  first-class request: it runs until the next `PreToolUse` event
-  and pauses inside the tool frame, with a turn-boundary fallback
-  if no further tool dispatch arrives. Pre-1.2.0 it aliased
-  `step_over`. See [`docs/modules/debug.md`](../modules/debug.md)
-  for the current step-request -> frame mapping (including the
-  `stepOut` semantics that depend on whether you're in an
-  orchestrator or tool frame).
+- **DAP `step_in` semantics (1.3.0+)** — `stepIn` is a first-class
+  request: it runs until the next `PreToolUse` event and pauses
+  inside the tool frame, with a turn-boundary fallback if no
+  further tool dispatch arrives. Pre-1.3.0 it aliased `step_over`.
+  See [`docs/modules/debug.md`](../modules/debug.md) for the
+  current step-request -> frame mapping (including the `stepOut`
+  semantics that depend on whether you're in an orchestrator or
+  tool frame).
 - **The CLI's REPL `inspect` command runs arbitrary Python** against
   the paused context. By design — it's a debugger. Don't expose
   this surface to untrusted users.

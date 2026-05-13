@@ -73,12 +73,27 @@ the REPL), source, continue, next, stepIn, stepOut, pause, terminate,
 disconnect; events: initialized, stopped, continued, output,
 terminated, exited.
 
-Stepping semantics: `next` and `stepIn` both run until the next
-break opportunity (typically the next iteration of the tool-use
-loop). `stepOut` is the same per-turn granularity today — a finer
-"skip remaining tool calls until end-of-turn" granularity is on the
-roadmap. `pause` is honored mid-trajectory: the next break check
-fires unconditionally and the runner stops at the next opportunity.
+Stepping semantics (frame-aware since 1.3.0 / Wave 13b M3.6):
+
+- `next` (step_over) runs to the next turn boundary, ignoring tool
+  dispatches in between.
+- `stepIn` (step_in) runs until the next `PreToolUse` event and
+  pauses inside the tool frame; if no further tool dispatch arrives
+  before the next turn boundary, it falls back to pausing there so
+  the editor's step-in button is never silently unresponsive.
+- `stepOut` (step_out) from inside a tool frame runs until the
+  current dispatch's `PostToolUse` fires, then pauses at the next
+  event (another `PreToolUse` in the same tool-use loop, or the
+  next turn boundary). From outside a tool frame, `stepOut` has no
+  outer frame to return to and falls back to step_over semantics.
+- `pause` is honored mid-trajectory: the next break check fires
+  unconditionally and the runner stops at the next opportunity.
+
+Frame-aware stepping requires the adapter to observe `PreToolUse`
+/ `PostToolUse` events. `harness debug --dap` wires this
+automatically via `DapAdapter.attach_hooks(hooks)`. If a host
+omits that call (legacy wiring), `stepIn` / `stepOut` degrade to
+per-turn `step_over` rather than being silently ignored.
 
 ## `harness cache-audit`
 

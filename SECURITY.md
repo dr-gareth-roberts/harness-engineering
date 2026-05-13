@@ -54,12 +54,13 @@ materializes.
 
 | Version | Supported |
 | --- | --- |
-| 1.0.x | ✅ current — security fixes via patch releases |
-| 0.x   | ❌ — pre-1.0; upgrade to 1.0.x |
+| 1.3.x | ✅ current — security fixes via patch releases |
+| 1.x (≤ 1.2)   | ❌ — superseded; upgrade to 1.3.x |
+| 0.x   | ❌ — pre-1.0; upgrade to 1.3.x |
 
 Security fixes are backported to the previous minor version line for
-6 months after a new minor releases (e.g., when `1.1.0` lands,
-`1.0.x` continues to receive security patches for 6 months).
+6 months after a new minor releases (e.g., when `1.4.0` lands,
+`1.3.x` continues to receive security patches for 6 months).
 
 ## Dependency risk
 

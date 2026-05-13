@@ -127,15 +127,15 @@ you call `DapAdapter` directly and omit `attach_hooks`, `stepIn` and
 `stepOut` degrade to `next` so the editor's buttons still pause
 *somewhere* — they just operate at coarser per-turn granularity.
 
-### Pre-1.1.0 limitation
+### Pre-1.3.0 limitation
 
-Before 1.1.0 (`audit/RELEASE-TODO.md` M3.6), all three step requests
-hard-aliased to `step_over`: `stepIn` and `stepOut` each set the
-same per-turn pause flag, so an editor user pressing "Step Into" got
-"advance one turn" instead of "enter this tool dispatch." The fix
-adds the hook-listener path described above; existing wiring keeps
-working because the new behavior only kicks in when
-`attach_hooks(...)` is called.
+Before the 1.3.0 audit batch, all three step requests hard-aliased
+to `step_over`: `stepIn` and `stepOut` each set the same per-turn
+pause flag, so an editor user pressing "Step Into" got "advance
+one turn" instead of "enter this tool dispatch." The fix adds the
+hook-listener path described above; existing wiring keeps working
+because the new behavior only kicks in when `attach_hooks(...)` is
+called.
 
 ## Related
 

@@ -173,12 +173,12 @@ The orchestrator's auto-opened scope respects the ambient
   satisfying that signature works; you don't need to inherit from a
   base class.
 
-### Migration from pre-1.2.0
+### Migration from pre-1.3.0
 
-Before M3.5, `OpenTelemetrySink` emitted each event as a flat OTel
+Before 1.3.0, `OpenTelemetrySink` emitted each event as a flat OTel
 `Event` on the currently active span and silently no-op'd onto
 `NonRecordingSpan` when no instrumented caller was wrapping the
-harness call. 1.2.0 replaces that with the synthesized-span
+harness call. 1.3.0 replaces that with the synthesized-span
 contract above: callers who used to rely on `add_event` semantics
 should now see real spans in their backend without any wrapping
 required. Backends that grouped events by `harness.trace_id`

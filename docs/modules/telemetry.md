@@ -142,6 +142,8 @@ fidelity floor:
 To unify with an upstream OTel trace, propagate the upstream
 trace_id into `session_scope`:
 
+<!-- reason: illustrative; references undefined `telemetry` / `upstream_trace_id_hex` and uses `async with` at module scope -->
+<!--pytest.mark.skip-->
 ```python
 async with telemetry.session_scope(trace_id=upstream_trace_id_hex):
     ...
@@ -152,6 +154,7 @@ The `tracer` kwarg pins the sink to a specific tracer instance
 or for multi-tenant configurations):
 
 ```python
+from harness.telemetry import OpenTelemetrySink
 from opentelemetry import trace
 sink = OpenTelemetrySink(tracer=trace.get_tracer("my-service"))
 ```
@@ -161,7 +164,7 @@ When omitted, the sink resolves a tracer from the global provider via
 
 When an event has no correlation IDs (emitted outside any
 `session_scope`), the sink falls back to the ambient OTel context —
-preserving the pre-M3.5 "ride on the surrounding span" behavior as
+preserving the pre-1.3.0 "ride on the surrounding span" behavior as
 graceful degradation.
 
 ## Gotchas

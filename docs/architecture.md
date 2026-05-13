@@ -120,5 +120,6 @@ src/harness/
 ├── attribute/  Leave-one-out causal attribution
 ├── cache/      Prompt-prefix-drift watcher
 ├── debug/      DebugRunner + REPL + DAP server
-└── speculate/  Predictor + Speculator + cross-session predictor
+├── speculate/  Predictor + Speculator + cross-session predictor
+└── streaming/  StreamEvent types + StreamingRunner Protocol
 ```

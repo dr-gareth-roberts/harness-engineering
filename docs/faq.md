@@ -183,15 +183,28 @@ Off by default. Set `allowEvaluate: true` in the launch arguments
 to enable. Same security trade-off as the REPL's `inspect` command
 — this is a debugger; only reachable in an opt-in debug session.
 
-### `step_in` doesn't go into the tool handler — why?
+### What do `next` / `stepIn` / `stepOut` actually do?
 
-Today, `step_in` uses the same per-turn `step_over` semantics: the
-runner resumes from the current breakpoint and pauses again at the
-next break opportunity (typically the next iteration of the
-tool-use loop). A finer "step into the tool handler" granularity
-needs a one-shot pre-tool-use breakpoint that the DebugRunner
-doesn't yet expose — tracked as a follow-up. `next`, `pause`, and
-`stepOut` all behave per-turn for the same reason.
+Since 1.3.0 / Wave 13b M3.6, the three DAP step requests are
+frame-aware:
+
+- `next` (step_over) runs to the next turn boundary, ignoring tool
+  dispatches in between.
+- `stepIn` runs until the next `PreToolUse` event and pauses inside
+  that tool frame; if no further tool dispatch arrives before the
+  next turn boundary, it falls back to pausing there so the
+  editor's step-in button is never silently unresponsive.
+- `stepOut` from inside a tool frame runs until the current
+  dispatch's `PostToolUse` fires, then pauses at the next event
+  (another `PreToolUse` or the next turn boundary). From outside a
+  tool frame, `stepOut` falls back to `step_over` since there's no
+  outer frame to return to.
+
+Frame-aware stepping is wired automatically by
+`harness debug --dap` via `DapAdapter.attach_hooks(hooks)`. Hosts
+that bypass that wiring see all three requests degrade to per-turn
+`step_over` rather than being silently ignored. `pause` is always
+honored mid-trajectory.
 
 ## Speculator
 
@@ -227,7 +240,7 @@ timing — eager per-block cancellation when
 
 ### Does `OpenTelemetrySink` create OTel spans?
 
-Yes. As of 1.2.0 (M3.5) the sink synthesizes one OTel span per
+Yes. As of 1.3.0 the sink synthesizes one OTel span per
 `TelemetryEvent` via `tracer.start_as_current_span(...)`. The span
 name is `event.kind` (e.g. `"tool.dispatched"`, `"orchestrator.turn"`),
 the payload fields become `harness.*`-prefixed attributes, and the
@@ -236,7 +249,7 @@ parent `SpanContext` is seeded from the harness recorder's
 OTel trace as the harness session. Events carrying `duration_ms`
 get a realistic `end_time` rather than a zero-width span.
 
-Pre-1.2.0 the sink emitted flat OTel `Event`s on whatever span was
+Pre-1.3.0 the sink emitted flat OTel `Event`s on whatever span was
 currently active, which silently no-op'd when no instrumented
 caller was wrapping the call (the ambient span was OTel's
 `NonRecordingSpan`). That known limitation is resolved — when

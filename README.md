@@ -148,10 +148,6 @@ Currently deferred (PRs welcome):
 - **`OpenAICompatRunner.run_stream()`** — `AnthropicRunner.run_stream()`
   ships; OpenAI's chat-completions streaming has a different
   delta-by-delta shape and is queued for a follow-up.
-- **DAP `step_in` finer granularity** — currently treated as
-  `step_over` because the underlying `DebugRunner` doesn't yet
-  expose a one-shot pre-tool-use breakpoint surface. Tracking as
-  follow-up work in `docs/plan.md`.
 
 ## License
 

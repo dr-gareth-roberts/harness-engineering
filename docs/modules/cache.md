@@ -28,7 +28,7 @@ watcher = PrefixWatcher(store=FileFingerprintStore("./cache-prints"))
 runner = AnthropicRunner(dispatcher, hooks, prefix_watcher=watcher)
 
 # Run normally. Drift is recorded; query later via:
-#   uv run harness cache-audit ./cache-prints --window-hours 24
+#   uv run harness cache-audit --store ./cache-prints --since 24h
 ```
 
 The audit CLI prints unified diffs per drift event:

@@ -118,14 +118,19 @@ uv build                         — wheel + sdist build cleanly
   keys for an end-to-end smoke. Users can call
   `client.beta.files.upload(...)` directly via the SDK today; the
   harness side handles the resulting `file_id` correctly (Wave 12).
-- **DAP `step_in` finer granularity** — currently treated as
-  `step_over`. To distinguish, the `DebugRunner` would need to
-  expose a one-shot pre-tool-use breakpoint. Documented as a
-  follow-up.
 
-These are the only two items from the original 28-gap audit that
-didn't land; both are honestly gated on credentials this environment
-doesn't have. The "1.0 ready" line is met.
+These two items from the original 28-gap audit didn't land; both are
+honestly gated on credentials this environment doesn't have. The
+"1.0 ready" line is met.
+
+> Wave 13b initially shipped `step_in` aliased to `step_over` (see
+> row #15 above) and listed the finer "step into the tool handler"
+> granularity as a follow-up. The post-Wave-13b audit batch (1.3.0,
+> M3.6) wired the frame-aware semantics via
+> `DapAdapter.attach_hooks(hooks)`: `step_in` now pauses at the next
+> `PreToolUse`, `step_out` from a tool frame pauses after the
+> current `PostToolUse`. See CHANGELOG `[1.3.0]` and
+> `src/harness/debug/dap.py:33-69`.
 
 ### Commits
 
