@@ -331,3 +331,110 @@ async def test_finalize_is_idempotent() -> None:
     guard.finalize()
     # Second call must not raise.
     guard.finalize()
+
+
+# --- M3.4 — subset matching is O(N), not O(N²) ----------------------------
+
+
+async def test_subset_mode_advances_past_unmatched_steps() -> None:
+    """Subset matching with a call that lines up with a step several positions
+    ahead must skip past the intermediate (unmatched) steps and land the
+    cursor on `match_index + 1`. Pins the cursor-advance contract that the
+    O(N) tool-name index relies on.
+    """
+    # Build a plan where `target` sits five positions past `_step_index`.
+    plan = Plan(
+        steps=[
+            PlannedToolCall(tool_name="a"),
+            PlannedToolCall(tool_name="b"),
+            PlannedToolCall(tool_name="c"),
+            PlannedToolCall(tool_name="d"),
+            PlannedToolCall(tool_name="e"),
+            PlannedToolCall(tool_name="target"),
+            PlannedToolCall(tool_name="trailing"),
+        ],
+        mode="subset",
+    )
+    runner = _scripted_runner([_tool_use_message(ToolCall(name="target", arguments={}, id="c1"))])
+    guard = PlanGuardedRunner(runner, plan)
+    await guard(_agent(), [])
+    # Match index is 5 (zero-based), so cursor lands on 5+1=6.
+    assert guard.step_index == 6
+    guard.finalize()
+
+
+async def test_subset_matching_is_linear_in_plan_size() -> None:
+    """Behaviour pin for M3.4: subset matching must tick each step at most
+    a bounded number of times across the whole session, not once per call.
+
+    The pre-fix implementation ticked every remaining step on every observed
+    call (≈ N² total ticks for an N-step plan run end-to-end). With the
+    tool-name index plus precompiled DFAs, the total tick count is the
+    number of matching candidates considered — at most N for unique tool
+    names. We assert the wall-clock proxy: total ticks ≤ 3 N for a
+    100-step plan with unique tool names.
+    """
+    n = 100
+    plan = Plan(
+        steps=[PlannedToolCall(tool_name=f"tool_{i}") for i in range(n)],
+        mode="subset",
+    )
+    # Drive the guard with every step in order — one tool_use per turn so
+    # the inner loop is exercised at every step boundary.
+    replies = [
+        _tool_use_message(ToolCall(name=f"tool_{i}", arguments={}, id=f"c{i}")) for i in range(n)
+    ]
+    runner = _scripted_runner(replies)
+    guard = PlanGuardedRunner(runner, plan)
+
+    # Count DFA ticks via monkey-patch on the precompiled DFA instances.
+    tick_count = 0
+    for dfa in guard._step_dfas:
+        original_tick = dfa.tick
+
+        def counted_tick(message, _orig=original_tick):  # type: ignore[no-untyped-def]
+            nonlocal tick_count
+            tick_count += 1
+            return _orig(message)
+
+        dfa.tick = counted_tick  # type: ignore[method-assign]
+
+    for _ in range(n):
+        await guard(_agent(), [])
+
+    # Linear-or-better: with unique tool names every call hits exactly one
+    # candidate, so total ticks should equal n. Leave headroom for any
+    # future short-circuit edge to land below 3n; well clear of n² = 10000.
+    assert tick_count <= 3 * n, (
+        f"expected linear tick count (~{n}), got {tick_count} for n={n}; "
+        "subset matching may have regressed to quadratic"
+    )
+    assert guard.step_index == n
+
+
+async def test_precompiled_dfa_reset_isolates_consecutive_ticks() -> None:
+    """Regression pin: caching DFAs across ticks requires `reset()` between
+    ticks. Without it, an `Always(...)` DFA that fired a violation on one
+    step would latch `_violated=True` and silently accept the next call.
+
+    Scenario: subset plan with two `search` steps. First call has wrong
+    args (DFA misses); second call has correct args. The misses must not
+    poison the DFA for the second call.
+    """
+    plan = Plan(
+        steps=[
+            PlannedToolCall(tool_name="search", arguments_match={"q": "rust"}),
+            PlannedToolCall(tool_name="search", arguments_match={"q": "go"}),
+        ],
+        mode="subset",
+    )
+    runner = _scripted_runner(
+        [
+            _tool_use_message(ToolCall(name="search", arguments={"q": "go"}, id="c1")),
+        ]
+    )
+    guard = PlanGuardedRunner(runner, plan)
+    await guard(_agent(), [])
+    # The first step's DFA missed (q="go" ≠ "rust"); the second step's DFA
+    # matched. Cursor lands on 1+1=2.
+    assert guard.step_index == 2

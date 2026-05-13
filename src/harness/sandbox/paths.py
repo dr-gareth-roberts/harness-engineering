@@ -32,6 +32,17 @@ class PathScope:
     can redirect the operation. Use OS-level isolation (sandbox, namespaces,
     seccomp) if real safety matters.
 
+    **Case-sensitivity is filesystem-dependent.** `Path.resolve()` does not
+    case-fold, so containment checks compare bytes exactly. On case-sensitive
+    filesystems (Linux ext4/xfs/btrfs, macOS APFS configured case-sensitive),
+    `deny=["/tmp/secret"]` blocks `/tmp/secret` but not `/tmp/SECRET`, which
+    is correct — those are distinct paths. On case-insensitive filesystems
+    (macOS-default APFS, Windows NTFS), `/tmp/secret` and `/tmp/SECRET`
+    resolve to the same on-disk object, but `PathScope` still treats them as
+    distinct strings: a deny on `/tmp/secret` will NOT block an access via
+    `/tmp/SECRET`. Operators on those platforms must either enumerate every
+    case variant or rely on OS-level isolation.
+
     Empty `allow_prefixes` means **everything is allowed**, subject to
     `deny_prefixes`. To deny by default, configure an explicit
     `deny_prefixes=("/",)` or pass an allow-list of an unreachable root.

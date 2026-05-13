@@ -189,6 +189,39 @@ async def test_audit_backfills_before_prompt_from_earlier_record() -> None:
     assert "after" in diff
 
 
+async def test_audit_backfill_uses_source_record_timestamp_not_intermediate() -> None:
+    """When the "before" prompt body is backfilled from an earlier
+    record (because the immediately-prior record didn't carry one under
+    `full_capture="on_drift"`), `DriftEvent.before_ts` must point at the
+    source record — the one whose body is actually rendered in the
+    diff — not the intermediate identical record.
+    """
+    store = InMemoryFingerprintStore()
+    t1 = datetime.now(UTC) - timedelta(minutes=30)
+    t2 = t1 + timedelta(minutes=1)
+    t3 = t1 + timedelta(minutes=2)
+    # R1: body P at t1.
+    await store.append(_record(ts=t1, bp=0, hash_="abc", full_prompt='"P"'))
+    # R2: same fingerprint, no body (on_drift policy: nothing changed).
+    await store.append(_record(ts=t2, bp=0, hash_="abc", full_prompt=None))
+    # R3: different fingerprint, body P' — this is the drift transition.
+    await store.append(_record(ts=t3, bp=0, hash_="def", full_prompt='"P\'"'))
+
+    report = await audit(store, window_hours=24)
+    assert len(report.drift_events) == 1
+    event = report.drift_events[0]
+    # The diff body comes from R1 ("P"), so before_ts must be t1 — not
+    # t2 (the intermediate record whose hash matched but whose body was
+    # absent).
+    assert event.before_ts == t1
+    assert event.before_ts != t2
+    assert event.after_ts == t3
+    # And the rendered diff still reflects R1's body, not <unavailable>.
+    assert "P" in event.diff
+    assert "P'" in event.diff
+    assert "<unavailable>" not in event.diff
+
+
 # ---------------------------------------------------------------------------
 # CLI: parsing, registration, and the spec's snapshot test.
 

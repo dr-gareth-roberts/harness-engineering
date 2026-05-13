@@ -42,11 +42,16 @@ class FakeOAResponse:
 
 
 class FakeOACompletions:
-    def __init__(self, responses: list[FakeOAResponse]) -> None:
+    def __init__(self, responses: list[FakeOAResponse], *, create_delay: float = 0.0) -> None:
         self._responses = list(responses)
+        self._create_delay = create_delay
         self.requests: list[dict[str, Any]] = []
 
     async def create(self, **kwargs: Any) -> FakeOAResponse:
+        if self._create_delay > 0:
+            import asyncio
+
+            await asyncio.sleep(self._create_delay)
         if not self._responses:
             raise RuntimeError("FakeOACompletions: no canned responses left")
         self.requests.append(kwargs)
@@ -54,10 +59,16 @@ class FakeOACompletions:
 
 
 class FakeOAChat:
-    def __init__(self, responses: list[FakeOAResponse]) -> None:
-        self.completions = FakeOACompletions(responses)
+    def __init__(self, responses: list[FakeOAResponse], *, create_delay: float = 0.0) -> None:
+        self.completions = FakeOACompletions(responses, create_delay=create_delay)
 
 
 class FakeAsyncOpenAI:
-    def __init__(self, responses: list[FakeOAResponse]) -> None:
-        self.chat = FakeOAChat(responses)
+    """Stand-in for `openai.AsyncOpenAI` with scriptable chat.completions.
+
+    `create_delay` lets tests inject a sleep into `chat.completions.create`
+    to drive timeout-related behavior. Default 0 = no sleep.
+    """
+
+    def __init__(self, responses: list[FakeOAResponse], *, create_delay: float = 0.0) -> None:
+        self.chat = FakeOAChat(responses, create_delay=create_delay)

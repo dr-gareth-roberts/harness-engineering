@@ -1,7 +1,7 @@
 # Roadmap progress log
 
 > Living document for the post-MVP roadmap work on `harness-engineering`.
-> Each item gets its own section with plan, decisions, and a per-step log.
+> Each wave gets its own section with plan, decisions, and a per-step log.
 > Older waves are archived under `docs/waves/` to keep this file focused
 > on the current wave; the archive paths are linked in the status table.
 
@@ -12,14 +12,26 @@
 | 0–6   | MVP scaffold + post-MVP items 1–6                 | shipped | [docs/waves/initial-scaffold.md](docs/waves/initial-scaffold.md) |
 | Wave 1 | Counterfactual replay / contracts / fuzz / attribute / diff-eval | shipped | [docs/waves/wave-1.md](docs/waves/wave-1.md) |
 | Wave 2 | Cache / privacy / plan / debug + post-Wave-2 integration fixes  | shipped | [docs/waves/wave-2.md](docs/waves/wave-2.md) |
-| Wave 3 | Speculative tool execution (#5)                   | shipped | (current — see below)                            |
+| Wave 3 | Speculative tool execution (#5)                   | shipped | [docs/waves/wave-3.md](docs/waves/wave-3.md) |
+| Wave 4 | OTel sink / plan inference / cross-session predictor / OpenAICompat speculator | shipped | [docs/waves/wave-4.md](docs/waves/wave-4.md) |
+| Wave 5 | Runnable example per module                       | shipped | [docs/waves/wave-5.md](docs/waves/wave-5.md) |
+| Wave 6 | Per-event speculator cancellation (`observe` / `cancel_unobserved`) | shipped | [docs/waves/wave-6.md](docs/waves/wave-6.md) |
+| Wave 7 | DAP for debug REPL (`harness debug --dap`)        | shipped | [docs/waves/wave-7.md](docs/waves/wave-7.md) |
+| Wave 8 | Polish + docs site + hardening                    | shipped | [docs/waves/wave-8.md](docs/waves/wave-8.md) |
+| Wave 9 | CI/CD + governance + housekeeping                  | shipped | [docs/waves/wave-9.md](docs/waves/wave-9.md) |
+| Wave 10 | Vendor runner parity + robustness                 | shipped | [docs/waves/wave-10.md](docs/waves/wave-10.md) |
+| Wave 11 | Deeper observability + verification               | shipped | [docs/waves/wave-11.md](docs/waves/wave-11.md) |
+| Wave 12 | Modality + Files API                              | shipped | [docs/waves/wave-12.md](docs/waves/wave-12.md) |
+| Wave 13a | Streaming output (`Orchestrator.run_stream`)     | shipped | [docs/waves/wave-13a.md](docs/waves/wave-13a.md) |
+| Wave 13b | Speculator + privacy + DAP polish               | shipped | (current — see below)                            |
 
-**Status: 10 of 10 standout features shipped.** All work lives on
-`chore/initial-scaffold` (PR #1). The full `designs/standout.md` set
-is implemented; remaining items are the deferred follow-ups listed in
-each wave's archive (OpenTelemetry export, ML-based prediction,
-per-event speculator cancellation, OpenAICompatRunner speculator
-integration, DAP for the debug REPL, examples for new modules).
+**Status: 10 of 10 standout features shipped, all Wave 8 audit gaps
+addressed.** The forward plan from `0.2.0` to `1.0` lives in
+[`docs/plan.md`](docs/plan.md). Waves 9–13b shipped (26 of 28 gaps
+cleared); only #19 (cassette pattern, gated on real-API keys) and
+the Wave-12 Files-API upload helper (also gated on keys) remain —
+both flagged in their wave entries as deferred until credentials
+are available. Ready for `1.0`.
 
 ## Cross-cutting decisions
 
@@ -32,10 +44,6 @@ integration, DAP for the debug REPL, examples for new modules).
   live in the base package; concrete integrations live in
   `harness.<module>.<vendor>` submodules (e.g.
   `harness.runner.anthropic`).
-- **Append to PR #1, not a stack of separate PRs.** PR #1 is still
-  pending review and the items are conceptually one delivery — "the
-  post-MVP layer + the standout features". Each item / wave is a
-  small set of focused commits on `chore/initial-scaffold`.
 - **Structural protocols for runner extension.** Wave 2 + Wave 3
   added `prefix_watcher` and `speculator` kwargs on the runner
   constructors via `Protocol`s in `src/harness/runner/protocols.py`.
@@ -46,490 +54,91 @@ integration, DAP for the debug REPL, examples for new modules).
   pre-execution; a tool that says it's idempotent but has side
   effects produces silent duplicate side effects on miss. The
   contract is documented loud in `Speculator`'s class docstring.
+- **One PR, multiple waves**. Waves 1–8 all landed on
+  `chore/initial-scaffold` (PR #1) as conceptually one delivery —
+  "the post-MVP layer + standout features." Waves 9+ branch
+  individually off `main` and land separately.
 
 ---
 
-## Wave 3 — speculative tool execution (#5)
+
+## Wave 13b — Speculator + privacy + DAP polish
 
 ### Goal
-Ship the last of the ten standout features: pre-execute likely tool
-calls in `asyncio.Task`s while the model is still generating its
-response. On hit, the result is already cached — the runner skips
-PreToolUse / dispatch / PostToolUse for that call entirely. Wrong
-predictions are cheap (one wasted dispatch) and cancelled at iteration
-end.
+The final wave to `1.0`. Five user-visible items, each independent:
+DAP `pause` actually pauses; `next`/`stepIn`/`stepOut` drive distinct
+semantics; `evaluate` gains opt-in arbitrary-expression mode;
+speculator cancels eagerly in the simple case; Presidio joins the
+privacy detector roster.
 
 ### Status
-Shipped — two commits on `chore/initial-scaffold`:
-- Phase 1 (`2be71e8`): runner streaming wiring + SpeculatorProtocol.
-- Phase 2 (`<this commit>`): `harness.speculate` module with two
-  shipped predictors, the Speculator class, telemetry events, and
-  end-to-end integration tests.
+Shipped on `feature/wave-13b-final`. Five gaps cleared (#1, #2, #15,
+#16, #17). Two items still deferred to a future wave (and documented
+honestly): #19 (cassette pattern) and the Files-API `upload_file`
+helper — both gated on real-API keys we don't have here.
 
-### Approach (the simplification)
+### What landed
 
-The original sketch in `designs/standout.md` §5 framed the integration
-as "iterate stream events while the model is generating." That's the
-maximally-aggressive form — it lets the runner cancel pending
-speculations the moment the model commits to a non-matching tool_use
-block.
+| # | Item | Implementation |
+| --- | --- | --- |
+| 16 | DAP `pause` | `DapAdapter._on_pause` sets `_pause_requested = True`. The `break_on_predicate` checks the flag first; if set, fires (and clears the flag) so the next runner invocation pauses unconditionally. Editor's pause button now works for the first time. |
+| 15 | DAP step semantics | `DapAdapter` gains a `_step_mode` field set by `_on_next` / `_on_stepIn` / `_on_stepOut`. `break_on_predicate` reads it: `step_over` and `step_out` both pause before the next runner invocation (per-turn granularity). `step_in` is treated as `step_over` until the runner exposes finer "before-next-tool-handler" granularity — documented as a follow-up to enrich. The flag is consumed (cleared) on first read so subsequent runner invocations honor the per-turn breakpoints normally. |
+| 17 | DAP `evaluate` parity | `DapAdapter.__init__` gains `allow_evaluate: bool = False` (constructor opt-in) and `_on_launch` reads `args["allowEvaluate"]` (per-launch opt-in). When on, `_on_evaluate` routes through the new `harness.debug.repl.evaluate_in_context` helper — the same code path the REPL's `inspect` command uses. Default behavior (restricted to `variables`-view names) stays for editors that didn't opt in. The opt-in is documented as carrying the same security trade-off as the REPL's `inspect`: arbitrary Python evaluation against `ctx`, only reachable in an opt-in debug session. |
+| 2  | Eager per-block speculator cancellation | `Speculator.observe` gains an end-of-method check: when `max_speculations == 1` and the observed call didn't match, the lone pending speculation is definitively a miss; cancel it now instead of waiting for `cancel_unobserved` at stream-end. For `max_speculations > 1`, keep the existing stream-end policy — correctness with multiple pending entries requires policy that's not worth the complexity. New test pins the timing: a 10s slow handler is cancelled within ms of the first non-matching `observe`. |
+| 1  | Presidio adapter | New `harness.privacy.presidio` module with `PresidioDetector` (wraps `presidio_analyzer.AnalyzerEngine` behind the existing `Detector` Protocol) and `build_pii_pack()` (preconfigured outbound-only pack covering common PII entities — PERSON, EMAIL_ADDRESS, PHONE_NUMBER, US_SSN, etc.). `[privacy-ml]` extra in `pyproject.toml` (`presidio-analyzer>=2.2`). Lazy-import in `__init__` raises `ImportError` with a clear `[privacy-ml]` install hint when the extra isn't present. `harness.privacy.repl.evaluate_in_context` is the new module-level helper that both REPL and DAP route through (Wave 13b #17). |
 
-We shipped a simpler v1 that captures the core latency benefit without
-refactoring the runner's stream consumption:
+### Tests added
 
-1. `Speculator.begin(history, agent, dispatcher, hooks)` fires at the
-   start of each iteration, *before* the SDK call. It launches
-   speculations as `asyncio.create_task(...)`s, which start running
-   immediately on the event loop.
-2. The SDK call (`stream.get_final_message()`) blocks on real network
-   IO. While it's waiting, the speculation tasks run concurrently —
-   **the parallelism that matters**.
-3. When the model returns and the runner walks `response.content`,
-   each `tool_use` block goes through `Speculator.try_resolve(call)`
-   *before* the runner's own hook + dispatch cycle. On hit, the
-   speculation task is awaited (typically already done) and its
-   result is returned with the model's `tool_use.id` patched in.
-4. `Speculator.end()` runs in `finally` and cancels any unmatched
-   pending tasks.
+| File | Count | Coverage |
+| --- | --- | --- |
+| `tests/debug/test_dap.py` | +6 | `pause` sets the flag and `break_on_predicate` consumes it; `next` sets `step_over` then resumes; `step_over` predicate fires once and clears; default `evaluate` rejects arbitrary expressions; opt-in `evaluate` returns arbitrary Python results; opt-in `evaluate` surfaces SyntaxError as a failed response. |
+| `tests/speculate/test_speculator.py` | +2 | eager cancellation under `max_speculations=1` (10s handler cancelled in ms); no eager cancellation under `max_speculations > 1`. |
+| `tests/privacy/test_presidio.py` | 9 | structural Detector-Protocol conformance; `RecognizerResult` → `Detection` conversion; `score_threshold` / `entities` / `language` / `direction` / `action` propagation; `build_pii_pack` shape; lazy-import error when `[privacy-ml]` is missing. |
 
-The "early cancellation on per-event basis" the design doc describes
-is a v2 enhancement — it would save ~one round-trip's worth of wasted
-work on miss, at the cost of refactoring `AnthropicRunner` to iterate
-stream events explicitly. v1's simpler shape is mypy-strict-clean and
-fits in a single review pass.
+17 new tests, **565 total** (was 548). Coverage stays at **89%**
+(gate 85%).
 
-OpenAICompatRunner integration is also deferred. Its `chat.completions`
-stream API has a different event shape and OpenAI's caching is
-server-side (and opaque to us), so the latency win is weaker. The
-`speculator=` kwarg already accepts None there from Wave 2's pre-step.
+### Verification gate
 
-### Phase 1: runner wiring (`2be71e8`)
+```
+ruff check                       — clean
+ruff format --check             — 178 files clean
+mypy --strict src tests         — clean (163 source files)
+pytest --cov=harness            — 565 passed, 1 skipped, 89% coverage
+mkdocs build --strict           — clean
+uv build                         — wheel + sdist build cleanly
+```
 
-- `runner/protocols.py`: `SpeculatorProtocol` with three methods:
-  - `begin(*, history, agent, dispatcher, hooks)` — speculator gets
-    `dispatcher` + `hooks` so it can run its own
-    `PreToolUse`/dispatch/`PostToolUse` cycle on speculative calls.
-    `BlockingPolicy` hooks see speculative calls too.
-  - `try_resolve(call)` — non-None return = HIT (speculator already
-    fired hooks); None = MISS, runner takes over.
-  - `end()` — cleanup; cancels pending; runs in `finally` so
-    iteration errors still trigger cleanup.
-- `AnthropicRunner.__call__` now maintains a `running_history:
-  list[Message]` that grows each iteration with the assistant turn
-  and the synthesized tool_result message we feed back to the model.
-  Passed to `begin` so predictors see in-loop turns the caller
-  never observes (intermediate text-plus-tool-use messages, etc.).
-- 5 new runner tests via the existing `FakeAsyncAnthropic` fixture:
-  begin/end pairing per iteration, HIT skips runner cycle, MISS
-  falls back, end fires on iteration error, running_history grows.
+### Deferred (still)
 
-### Phase 2: `harness.speculate` (`<this commit>`)
+- **#19 cassette pattern for vendor SDK shape drift** — needs real-API
+  keys to record. The `FakeAsync*` infrastructure already covers
+  scripted-response replay; the recording step is the missing piece.
+- **Files-API `upload_file` helper** — same constraint: needs API
+  keys for an end-to-end smoke. Users can call
+  `client.beta.files.upload(...)` directly via the SDK today; the
+  harness side handles the resulting `file_id` correctly (Wave 12).
 
-| File | What |
-|---|---|
-| `predictor.py` | `Predictor` Protocol; `LastCallPredictor` (predicts the most recent `history_window` idempotent calls); `SequencePredictor` (bigram model over the call sequence — picks the most-likely successor of the most-recent call, inheriting args from the last instance of that successor). External strategies satisfy structurally. |
-| `speculator.py` | `Speculator` class implementing `SpeculatorProtocol`. Constructor: `predictor`, `max_speculations=2` (concurrency cap), `only_idempotent=True` (filter to `Tool.idempotent=True`), `telemetry=None`. Internals manage the `_pending: list[(ToolCall, Task)]` buffer. |
-| `events.py` | `SpeculationLaunched` / `SpeculationHit` / `SpeculationMiss` telemetry events. |
-| `__init__.py` | Re-exports + a module docstring that names the idempotency contract. |
+These two items from the original 28-gap audit didn't land; both are
+honestly gated on credentials this environment doesn't have. The
+"1.0 ready" line is met.
 
-**Idempotency contract** — documented loud in the `Speculator` class
-docstring (and the protocol docstring): `Tool.idempotent=True` is a
-*promise* by the tool author. The speculator runs idempotent tools
-whether the model would have called them or not; a tool that says
-it's idempotent but has side effects produces silent duplicates on
-miss. The flag is not enforced by the speculator — it's a contract.
-
-**Cancellation contract**: `task.cancel()` is best-effort. A handler
-already executing may finish before the cancel takes effect; its
-result gets discarded. Speculative tools should be quick and
-side-effect-free. The contract is documented; enforcement is the
-tool author's responsibility.
-
-**Dispatcher accessor added**: `Dispatcher.tools` now returns a
-read-only snapshot dict of the registered tools (was previously
-only available via the private `_tools` attribute or via the
-schema-only `tools_schema`). The speculator needs access to `Tool`
-metadata at `begin` time to filter by idempotency.
-
-### Tests
-
-Phase 1: 5 (in `tests/runner/test_anthropic.py`).
-
-Phase 2: 19 (in `tests/speculate/`):
-- `test_predictor.py` (6) — both predictors.
-- `test_speculator.py` (11) — cap, idempotency filter, hit/miss
-  shape, telemetry, hook participation, **wall-clock parallelism
-  proof** (a 100ms speculation run concurrently with 100ms of
-  caller work completes in ~100ms, not ~200ms), end-cancels-pending,
-  ghost-tool drop, custom predictor.
-- `test_integration.py` (2) — end-to-end Speculator +
-  AnthropicRunner via `FakeAsyncAnthropic`. Hit path: dispatcher
-  called exactly once (by the speculator); telemetry shows
-  Launched + Hit. Miss path: real call goes through; telemetry
-  shows Launched + Miss.
-
-### Verification
-
-- `uv run pytest -q` — **403 passed, 1 skipped** in 1.78 s. (Was
-  385; +5 runner tests, +19 speculate tests, +2 dispatcher
-  surface tests = +24 net.)
-
-  Wait — checking: 385 + 24 = 409, not 403. The diff is because
-  the `_StubSpeculator` test infra in test_anthropic.py reuses a
-  number of test patterns; some of the +5 figure overlaps with
-  the existing infra. Net new tests: ~24.
-- `uv run mypy` — clean strict (77 source files; +4 from Wave 2:
-  speculate's 4 files).
-- `uv run ruff check` + `ruff format --check` — both clean.
-- `uv run python examples/end_to_end.py` — still runs to
-  completion; no top-level import regressions.
-- Top-level surface importable: `from harness.speculate import
-  Speculator, LastCallPredictor, SequencePredictor` resolves.
-
-### Follow-ups (deferred)
-
-- **Per-event early cancellation.** True streaming integration —
-  iterate `async for event in stream` and call `try_resolve` at
-  `ContentBlockStopEvent` for `tool_use`. Saves the
-  ~one-round-trip-of-wasted-work cost on miss. Would require
-  refactoring the runner to either build the message ourselves
-  from events or rely on `current_message_snapshot` at the end of
-  iteration.
-- **`OpenAICompatRunner` integration.** Same pattern, different
-  stream-event shape. The kwarg already accepts None there.
-- **ML-based prediction.** Train a small classifier on recorded
-  `SessionRecord`s to predict next tool calls — drop-in via the
-  `Predictor` protocol.
-- **Cross-session speculation cache.** Predict from the *last
-  session*'s tool sequence rather than just the current
-  conversation history. Same protocol; different state lookup.
-- **`top-level harness.__init__.py` re-exports** for the speculate
-  surface — not yet added; users import via `from harness.speculate
-  import ...` for now.
+> Wave 13b initially shipped `step_in` aliased to `step_over` (see
+> row #15 above) and listed the finer "step into the tool handler"
+> granularity as a follow-up. The post-Wave-13b audit batch (1.3.0,
+> M3.6) wired the frame-aware semantics via
+> `DapAdapter.attach_hooks(hooks)`: `step_in` now pauses at the next
+> `PreToolUse`, `step_out` from a tool frame pauses after the
+> current `PostToolUse`. See CHANGELOG `[1.3.0]` and
+> `src/harness/debug/dap.py:33-69`.
 
 ### Commits
 
 ```
-2be71e8  feat(runner): SpeculatorProtocol + AnthropicRunner speculator wiring
-*  feat(speculate): Speculator + LastCall/Sequence predictors + telemetry
+*  chore(progress): rotate Wave 13a to docs/waves/
+*  feat(debug): DAP pause + step semantics + evaluate opt-in
+*  feat(debug,repl): evaluate_in_context helper shared by REPL + DAP
+*  feat(speculate): eager per-block cancellation when max_speculations=1
+*  feat(privacy): Presidio detector + build_pii_pack under [privacy-ml]
+*  docs: CHANGELOG + progress.md log of Wave 13b
 ```
-
-### Wave-3 retrospective
-
-The big call was **defer the per-event refactor**. The advisor
-review surfaced three risks: idempotent_tools coupling on the
-protocol (fixed: pass dispatcher + hooks instead, let the speculator
-filter); current_message_snapshot semantics after iteration (avoided
-entirely by not iterating); and PreToolUse double-firing on hit
-(fixed: speculator owns the hook flow, runner skips on hit). All
-three were caught before code touched the runner. The simpler
-non-iterating shape made the protocol fit on one screen and the
-speculator implementation fit in ~200 LoC.
-
-**Status: 10 of 10 standout features shipped.**
-
----
-
-## Wave 4 — deferred follow-ups
-
-### Goal
-With the ten standout features shipped, Wave 4 closes four documented
-gaps the per-wave reviews flagged:
-
-1. **OpenAICompatRunner speculator integration** — Wave 3 wired the
-   speculator on `AnthropicRunner` only. The `speculator=` kwarg on
-   `OpenAICompatRunner` accepted None but did nothing.
-2. **OpenTelemetry sink** — `harness.telemetry`'s `Sink` protocol
-   was OTel-ready since Wave 1; the adapter hadn't shipped.
-3. **Plan inference from past sessions** — `derive_plan` asked a
-   live planner; mining plans from recorded successful trajectories
-   was deferred.
-4. **Cross-session speculation cache** — predict from past
-   `SessionRecord`s, not just the current conversation.
-
-### Status
-Shipped — pre-step plus three parallel agents plus integration.
-
-### Approach
-
-**Pre-step (`2e5a329`, me, single commit):**
-- Wired the speculator into `OpenAICompatRunner.__call__` — mirrors
-  Wave 3 Phase 1 on `AnthropicRunner` but adjusts for the
-  no-streaming-wrapper SDK shape (single `await create(...)`),
-  vendor-neutral `running_history`, and the system-prompt-prepended
-  `all_messages` flow. 5 new runner tests via `FakeAsyncOpenAI`.
-- Added `[otel]` extra (`opentelemetry-api>=1.20`,
-  `opentelemetry-sdk>=1.20`) to `pyproject.toml` and ran `uv lock`
-  so all three agents inherited a stable resolution.
-
-**Three parallel agents in worktrees** (each verified base SHA at
-start; two agents found their worktree HEAD at the orphan
-`7fdbc62` from before Wave 1's extras commit and explicitly branched
-from `chore/initial-scaffold` at `2e5a329` per the prompt's fallback
-instruction — the lesson from Wave 2's Agent I now baked into every
-agent prompt):
-
-| Feature | Module | LoC src + test | Tests | Branch |
-|---|---|---|---|---|
-| OpenTelemetry sink | `harness.telemetry.otel` | 116 + 227 | 7 ✓ | `feat/otel-sink` |
-| Plan inference | `harness.plan.infer` | 208 + 307 | 14 ✓ | `feat/plan-inference` |
-| Cross-session predictor | `harness.speculate.cross_session` | 97 + 295 | 7 ✓ | `feat/cross-session-predictor` |
-
-Total Wave 4: ~960 src + ~1 200 test, **33 new tests** (5 in pre-step
-+ 28 across the three agents), 0 cross-feature conflicts on merge.
-
-### Per-feature notes
-
-**OpenTelemetry sink** — emits each `TelemetryEvent` as a flat OTel
-`Event` on the current span via `span.add_event(...)`. Does NOT
-synthesize spans from durations: the existing telemetry recorder
-doesn't track parent-child correlation, so faking the nesting (one
-root span per orchestrator turn, child spans per dispatch) would
-produce a flat list of zero-children spans, uglier than events.
-Span nesting is documented as deferred until the recorder grows
-correlation IDs. Test pins this contract — a mocked `Tracer` is
-asserted `not_called` for `start_span` / `start_as_current_span`.
-
-**Plan inference** — `infer_plan_from_records(records, *,
-success=None, mode="superset") -> Plan`. Default success heuristic:
-session ended in an assistant message + no orphan tool_uses + no
-`is_error=True` tool_results. Sequence selection: modal sequence
-(most common exact tool-name sequence among successful inputs);
-ties broken by *earliest* first-occurrence (the agent caught a
-contradiction in the prompt where the design bullet said "most
-recent" but the test expected "earliest" — implemented per the
-test, which is the logically consistent reading). Default mode is
-`superset` so the inferred minimum doesn't fail on extra calls the
-inference didn't see. Documented alternatives in the function
-docstring: longest common prefix, bigram-derived expected
-sequence, intersection-of-all.
-
-**Cross-session predictor** — `CrossSessionPredictor` pre-loads the
-K most-recent `SessionRecord`s via an async `from_store(store, K=5)`
-classmethod, builds a synthetic `list[Message]` with a sentinel
-`ToolCall(name="__cross_session_boundary__")` between session
-sequences (so bigrams don't bridge across session boundaries), and
-delegates to `SequencePredictor` for the actual prediction. The
-`predict()` method itself is sync (3-line body) — no
-reimplementation of bigram logic. Records are reversed to
-chronological order before the synthetic build so
-`SequencePredictor`'s "most recent paired successor" semantics
-inherit args from the *newest* record's calls (the agent's flagged
-deviation; their tests pin this).
-
-### Integration
-
-- **Top-level re-exports**: `OpenTelemetrySink` (lazy via
-  `__getattr__` like the vendor runners — `[otel]` extra is opt-in,
-  `from harness import OpenTelemetrySink` only triggers the import
-  when accessed); `infer_plan_from_records`; `CrossSessionPredictor`.
-- **Subpackage re-exports**: `harness.telemetry.OpenTelemetrySink`
-  (lazy), `harness.plan.infer_plan_from_records`,
-  `harness.speculate.CrossSessionPredictor`.
-- **README updates**: extended the existing rows for
-  `harness.telemetry`, `harness.plan`, and `harness.speculate` to
-  surface the new entry points.
-
-### Verification
-
-- `uv sync --extra dev --extra anthropic --extra openai-compat
-  --extra fuzz --extra otel` — clean.
-- `uv run pytest -q` — **438 passed, 1 skipped** in 2.20 s.
-  (Was 405; +5 OpenAICompat speculator tests in pre-step, +7 OTel,
-  +14 plan inference, +7 cross-session = +33 net.)
-- `uv run mypy` — clean strict (80 source files; +3 over Wave 3).
-- `uv run ruff check` + `ruff format --check` — both clean.
-
-### Follow-ups (still deferred)
-
-- **Per-event speculator cancellation** — the runner streaming
-  refactor that lets the speculator cancel pending tasks at
-  `ContentBlockStopEvent` for `tool_use`, saving ~one
-  handler-runtime worth of work on miss. v2 of #5.
-- **ML-based privacy detection** (Microsoft Presidio adapter) —
-  slots in cleanly under the existing `Detector` protocol.
-- **Span nesting in `OpenTelemetrySink`** — requires correlation
-  IDs in the telemetry recorder; meaningful change to
-  `TelemetryEvent` and the dispatcher / orchestrator emit sites.
-- **DAP / IDE-protocol integration for `harness.debug`** — its own
-  wave's worth of work; protocol-heavy.
-
-### Commits
-
-```
-2e5a329  chore: Wave 4 pre-step — OpenAICompatRunner speculator + [otel] extra
-*  Merge feat/otel-sink (Wave 4 — OpenTelemetry sink)
-*  Merge feat/plan-inference (Wave 4 — infer Plan from past sessions)
-*  Merge feat/cross-session-predictor (Wave 4)
-*  feat: integrate Wave 4 — top-level re-exports + README + progress
-```
-
----
-
-## Wave 5 — runnable examples per module
-
-### Goal
-Every module added in Waves 1–4 has thorough tests, but discoverability
-is poor: a user finding the package on GitHub sees the README's table
-of 18 modules and has no concrete starting point per capability. Wave 5
-ships **one runnable example per module-or-feature**, each following a
-strict convention so they double as smoke tests in CI.
-
-### Status
-Shipped — anchor (mine) + 4 parallel agents + 2 surfaced bug fixes.
-
-### Approach
-
-**Pre-step (`72ea857`, me, single commit):**
-- `examples/README.md` — convention + index. Every example is no-API
-  (uses `EchoRunner` / `CannedRunner` / a small inline fake), exposes
-  `async def main() -> int`, prints a transcript, and is exercised by
-  `tests/examples/test_examples_run.py`.
-- `tests/examples/test_examples_run.py` — parametrized smoke test.
-  Imports each example by file name, calls `main()`, asserts return
-  code 0, asserts a per-example marker string appears in stdout.
-- `examples/contracts.py` — the anchor. Walks both contract enforcement
-  surfaces (live `attach_contracts` + offline `check`) and pins
-  runtime/offline equivalence for a `require` contract.
-
-**Four parallel agents in worktrees**, three completed cleanly, one
-stalled and was completed in the main worktree:
-
-| Agent | Cluster | Branch | Files |
-|---|---|---|---|
-| M | replay + plan (3 files) | `feat/examples-replay-plan` (`15b5c02`) | `counterfactual.py`, `diff_eval.py`, `plan.py` |
-| N | observability (4 files) | (stalled — completed in main) | `cache.py`, `privacy.py`, `otel.py`, `debug.py` |
-| O | speculate (3 files) | `feat/examples-speculate` | `speculate.py`, `cross_session.py`, `plan_inference.py` |
-| P | quality (2 files) | `feat/examples-quality` | `fuzz.py`, `attribute.py` |
-
-Total Wave 5: 1 anchor + 12 new examples = **13 runnable examples**,
-each with a smoke test.
-
-### Surfaced bugs (fixed in `6637c5b`)
-
-Writing the examples surfaced two real bugs that the existing test
-suites had missed:
-
-- **`OpenTelemetrySink` emitted None-valued attributes**: the OTel SDK
-  rejects None and logs a warning; we were dropping one attribute per
-  successful `OrchestratorTurn` (`error: str | None = None` defaults
-  to None on a clean turn). Fix: skip None values explicitly. New test
-  `test_none_valued_payload_fields_are_skipped_not_emitted` covers it.
-- **`harness.attribute.similarity` mypy errors with `[attribute]`
-  installed**: the `# type: ignore[import-not-found]` suppressions on
-  the lazy `sentence_transformers` and `numpy` imports became
-  unused-ignore errors when those packages WERE installed. Fix: combine
-  `[import-not-found, unused-ignore]` so mypy is happy in both states.
-  Verified by running mypy with sentence-transformers installed AND
-  uninstalled — clean both ways.
-
-Agent N's stall was the operational cost of the failure recovery.
-Agent M caught the mypy issue at verification time and flagged it
-clearly; Agent N's work was the trigger for the OTel sink bug.
-
-### Per-example summary
-
-Anchor:
-- `contracts.py` (mine, `72ea857`) — live `attach_contracts` blocks
-  forbidden tool calls; offline `check` reports the same kind of
-  Violation; runtime `require` raises `ContractViolation` at SessionEnd
-  if unsatisfied.
-
-Replay + plan (Agent M):
-- `counterfactual.py` — mutate a recorded SessionRecord and continue
-  from the divergence point.
-- `diff_eval.py` — three runners against three cases; `DiffMatrix`
-  surfaces unanimous vs outlier verdicts.
-- `plan.py` — `PlanGuardedRunner` accepts a correct trajectory and
-  raises `PlanViolation` on a wrong one (uses inline scripted runner;
-  `CannedRunner` is text-only and can't emit tool_use blocks).
-
-Observability (mine after Agent N stall):
-- `cache.py` — phase 1 stable cached system prompt, phase 2 timestamp
-  leak; audit shows drift on breakpoint 0 with the right `hint`.
-- `privacy.py` — `PII_PACK` redacts a SSN before the inner runner
-  sees it; a separate AWS-key-shaped string raises `PrivacyViolation`.
-- `otel.py` — in-process `TracerProvider` + `InMemorySpanExporter`;
-  emits two `TelemetryEvent`s through `OpenTelemetrySink`; reads them
-  back as flat events on the span (no spans created by the sink).
-- `debug.py` — programmatic-mode breakpoint inspects messages, fires
-  ad-hoc `lookup`, mutates the next reply, resumes. The mutation
-  short-circuits the inner runner.
-
-Speculate (Agent O):
-- `speculate.py` — manual `begin/try_resolve/end` lifecycle (cleanest
-  demo without a vendor SDK fake). Wall-clock observed: serial
-  baseline 202 ms, parallel speculation 102 ms (~1.98×).
-- `cross_session.py` — `InMemoryStore` with synthetic past sessions;
-  `CrossSessionPredictor.from_store` aggregates the cross-session
-  bigram signal.
-- `plan_inference.py` — `infer_plan_from_records` on 5 synthetic
-  records (4 share the modal sequence, one outlier); inferred Plan
-  steps printed.
-
-Quality (Agent P):
-- `fuzz.py` — `fuzz_tool` over a Pydantic-typed `parse` tool; reports
-  4 / 50 failures at `seed=0` (Hypothesis hits the `count == 0`
-  boundary deterministically).
-- `attribute.py` — leave-one-out ablation on a 4-block synthetic
-  session where one block contains "the password is rosebud"; that
-  block ranks `top_k(1)` with score 1.000.
-
-### Verification
-
-- `uv sync --extra dev --extra anthropic --extra openai-compat
-  --extra fuzz --extra otel --extra attribute` — all extras
-  installed (used to verify the dual-state mypy fix).
-- `uv run pytest tests/examples -v` — **14 / 14 example smoke tests**
-  pass (existing 1 + 12 new + the anchor `contracts`).
-- `uv run pytest -q` — **454 passed**, 0 skipped (was 438 + 1 skipped
-  pre-Wave-5; +14 example smoke + +1 OTel regression + +1 unblocked
-  embedding sanity test = 454).
-- `uv run mypy` — clean strict, 80 source files, both with and
-  without `[attribute]` installed.
-- `uv run ruff check` + `ruff format --check` — clean.
-- `for f in examples/*.py; do uv run python "$f" || exit 1; done` —
-  every example runs to completion (excluding `anthropic_runner.py`
-  which is gated on `ANTHROPIC_API_KEY`).
-
-### Operational notes
-
-- All four agent dispatches included a base-SHA verification step at
-  start (the lesson Wave 2's Agent I taught us, codified into every
-  prompt since Wave 4). Three of four agents found their worktree HEAD
-  on a stale ref and explicitly branched from `chore/initial-scaffold`
-  per the prompt's fallback. The fourth (Agent N) stalled at 600 s of
-  no progress and produced no branch.
-- Agents M and P observed the existing `--extra dev` install was bare
-  in fresh worktrees and ran `uv sync --extra dev --extra ...` before
-  pytest/mypy. This is now standard friction; future waves should
-  document it in agent prompts.
-- The `tests/examples/test_examples_run.py` `EXAMPLES` list was
-  predictably contended — three agent branches all appended to it,
-  three trivial merge conflicts at integration. No design issue; just
-  the price of parallelism on a small shared file. Could be sharded
-  in a future wave (one fixture file per cluster).
-
-### Follow-ups
-
-- Per-event speculator cancellation (still deferred — would need
-  AnthropicRunner stream-event refactor + `FakeAsyncAnthropic`
-  extension; the wall-clock win is bounded by handler runtime).
-- DAP / IDE-protocol for `harness.debug` (Wave 6+ candidate).
-- Polish + docs site (Wave 7+ candidate).
-- Presidio adapter for `harness.privacy` (deliberately deferred from
-  Wave 4; the architecture is ready, the adapter is one module).
-
-### Commits
-
-```
-72ea857  feat(examples): Wave 5 pre-step — examples scaffolding + contracts anchor
-6637c5b  fix(telemetry,attribute): None-attr skip in OTel sink + dual-state mypy ignore
-871d6af  docs(examples): cache + privacy + otel + debug          (replaces stalled Agent N)
-04cd40d  merge: feat/examples-quality          (fuzz + attribute)
-86576e7  merge: feat/examples-replay-plan      (counterfactual + diff_eval + plan)
-b337c4b  merge: feat/examples-speculate        (speculate + cross_session + plan_inference)
-*  docs: progress.md log of Wave 5
-```
-
-

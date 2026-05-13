@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from harness.agents.definition import SubAgent
 from harness.memory.record import SessionRecord
@@ -160,7 +161,7 @@ async def test_cluster_detection_identifies_dissenter_by_name() -> None:
 # Test 6: HTML report renders without errors
 
 
-async def test_report_html_renders_with_case_and_runner_names(tmp_path) -> None:
+async def test_report_html_renders_with_case_and_runner_names(tmp_path: Path) -> None:
     cases = [
         EvalCase(name="alpha-case", prompts=["hi"]),
         EvalCase(name="beta-case", prompts=["hi"]),

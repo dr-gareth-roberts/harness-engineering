@@ -20,6 +20,7 @@ from harness.fuzz.runner import (  # noqa: E402
 from harness.hooks import HookRunner  # noqa: E402
 from harness.prompts import Message, text  # noqa: E402
 from harness.tools import Dispatcher, Tool, ToolCall  # noqa: E402
+from harness.tools.schema import ToolResult  # noqa: E402
 
 
 class _StringIn(BaseModel):
@@ -65,7 +66,7 @@ async def test_fuzz_tool_finds_failure_on_empty_string_handler() -> None:
     empty_failures = [f for f in report.failures if f.input.get("raw") == ""]
     assert empty_failures, 'expected `""` to surface as a failure'
     failure = empty_failures[0]
-    assert failure.result is not None
+    assert isinstance(failure.result, ToolResult)
     assert failure.result.is_error is True
 
 

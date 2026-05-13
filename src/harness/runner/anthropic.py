@@ -6,18 +6,27 @@ for tool execution and fires `PreToolUse` / `PostToolUse` events around each
 dispatch — so `harness.policy` policies attached as hooks Just Work.
 
 Caveats:
-- `HookDecision.replacement` is ignored; only `block` is honoured.
-- `cache_control` is rendered 1:1 from `ContentBlock.cache=True`. Anthropic
-  caps the request at 4 cache breakpoints; the runner does not enforce that
-  cap. Use `compact()` or trim the prefix before calling.
-- `pause_turn` and `refusal` stop reasons surface as `RuntimeError`.
+- `HookDecision` honors `block` (short-circuit to is_error result) and
+  `replacement` (PreToolUse: skip dispatch, use supplied result;
+  PostToolUse: rewrite the dispatched result before sending back).
+- `cache_control` is rendered 1:1 from `ContentBlock.cache=True`. The runner
+  enforces Anthropic's 4-cache-breakpoint cap client-side: a request with
+  more raises `CacheBreakpointLimitExceeded` *before* the SDK call,
+  surfacing the failure at the harness boundary instead of the API boundary.
+- `pause_turn` and `refusal` stop reasons fire `PauseTurn` / `Refusal`
+  hook events and the partial assistant message is returned. Callers
+  can register hooks to react (re-invoke on pause, log on refusal).
 - File blocks are inlined as text (`<file path=...>\n...\n</file>`); Files API
   integration is deferred.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from typing import Any, Literal
 
 try:
@@ -26,19 +35,69 @@ try:
 except ImportError as exc:
     raise ImportError(
         "harness.runner.anthropic requires the anthropic SDK. "
-        "Install with: pip install 'harness-engineering[anthropic]'"
+        "Install with: pip install 'harness-engineering-toolkit[anthropic]'"
     ) from exc
 
 from harness.agents.definition import SubAgent
-from harness.hooks.events import PostAssistantMessage, PostToolUse, PreToolUse
+from harness.hooks.events import (
+    PauseTurn,
+    PostAssistantMessage,
+    PostToolUse,
+    PreToolUse,
+    Refusal,
+)
 from harness.hooks.runner import HookRunner
 from harness.prompts.messages import ContentBlock, Message
 from harness.runner.protocols import PrefixWatcherProtocol, SpeculatorProtocol
+from harness.streaming import (
+    MessageEnd,
+    StreamEvent,
+    TextDelta,
+    ToolUseEnd,
+    ToolUseStart,
+)
 from harness.tools.dispatcher import Dispatcher
 from harness.tools.schema import ToolCall, ToolResult
 
+logger = logging.getLogger(__name__)
+
 ThinkingMode = Literal["adaptive", "disabled"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+# Anthropic's API caps each request at this many `cache_control` markers
+# across all messages + system blocks. Going over yields a 400 from the
+# API; we surface it client-side as a typed exception instead.
+_CACHE_BREAKPOINT_LIMIT = 4
+
+
+class CacheBreakpointLimitExceeded(ValueError):
+    """The translated request carries more than 4 `cache_control` markers.
+
+    The Anthropic API rejects such requests; this exception surfaces the
+    failure at the harness boundary so the caller gets a clear, typed
+    error instead of an opaque 400. The message names the count we
+    saw and points at `harness.prompts.compact` (or trimming
+    `ContentBlock.cache=True` markers) as the resolution.
+    """
+
+
+def _count_cache_breakpoints(request: dict[str, Any]) -> int:
+    """Count `cache_control` markers in the translated request shape.
+
+    Walks every message's content list looking for blocks with a
+    `cache_control` key. The runner's `_translate_block_in` is the only
+    place these markers are emitted, so the count is exact.
+    """
+    total = 0
+    for msg in request.get("messages", []):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and "cache_control" in block:
+                total += 1
+    return total
 
 
 def _serialize_tool_content(content: Any) -> str:
@@ -68,7 +127,29 @@ def _translate_block_in(block: ContentBlock) -> dict[str, Any] | None:
             "content": _serialize_tool_content(tr.content),
             "is_error": tr.is_error,
         }
+    elif block.type == "image" and block.image is not None:
+        # Anthropic vision shape (Wave 12 #7): {"type":"image",
+        # "source":{"type":"base64"|"url","media_type":...,"data":...}}.
+        # Both source modes use the same envelope; the SDK validates
+        # `media_type` against the supported list.
+        out = {
+            "type": "image",
+            "source": {
+                "type": block.image.source,
+                "media_type": block.image.media_type,
+                "data": block.image.data,
+            },
+        }
+    elif block.type == "file" and block.file_id is not None:
+        # Wave 12 #8 — Anthropic Files API integration. Reference the
+        # uploaded file by id; the API resolves the content server-side.
+        out = {
+            "type": "document",
+            "source": {"type": "file", "file_id": block.file_id},
+        }
     elif block.type == "file":
+        # Path-based fallback: inline the file's text contents as a
+        # text block, the historical pre-Wave-12 behavior.
         out = {
             "type": "text",
             "text": f"<file path={block.path}>\n{block.text or ''}\n</file>",
@@ -146,16 +227,46 @@ class AnthropicRunner:
         max_iterations: int = 10,
         prefix_watcher: PrefixWatcherProtocol | None = None,
         speculator: SpeculatorProtocol | None = None,
+        timeout_s: float | None = None,
     ) -> None:
         self.dispatcher = dispatcher
         self.hooks = hooks
-        self._client = client if client is not None else AsyncAnthropic()
+        # Lazy client construction (M1.26): the Anthropic SDK reads
+        # `ANTHROPIC_API_KEY` from the environment in `AsyncAnthropic()`
+        # and raises if missing. Deferring construction to first use lets
+        # callers instantiate `AnthropicRunner` without an API key
+        # configured — handy for test scaffolding and for processes that
+        # only conditionally call the runner. Tests inject a
+        # pre-constructed `client=` to bypass the SDK entirely.
+        self._client: AsyncAnthropic | None = client
         self._max_tokens = max_tokens
         self._thinking_mode: ThinkingMode = thinking_mode
         self._effort: Effort | None = effort
         self._max_iterations = max_iterations
         self._prefix_watcher = prefix_watcher
         self._speculator = speculator
+        # Per-iteration timeout. None = no timeout (default; matches the
+        # SDK's own behavior). When set, the entire stream-and-iterate
+        # phase per iteration is wrapped in `asyncio.wait_for`. Note this
+        # is per *iteration*, not per *call* — a 5s timeout on a tool-use
+        # loop with 3 iterations gives the model up to 15s wall-clock
+        # total. Retry/backoff is intentionally deferred (Wave 10 +
+        # streaming + speculator state make a clean retry semantic
+        # non-trivial; see docs/plan.md).
+        self._timeout_s = timeout_s
+
+    @property
+    def client(self) -> AsyncAnthropic:
+        """Return the SDK client, constructing on first access.
+
+        Constructing `AsyncAnthropic()` reads `ANTHROPIC_API_KEY` from
+        the environment and raises if missing — so deferring to first
+        access means a missing key surfaces at the first runner call,
+        not at `__init__`. The instance is cached for subsequent calls.
+        """
+        if self._client is None:
+            self._client = AsyncAnthropic()
+        return self._client
 
     def _build_request(
         self,
@@ -187,6 +298,67 @@ class AnthropicRunner:
         return kwargs
 
     async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
+        """Drive the tool-use loop and return the terminal assistant `Message`.
+
+        Consumes the shared `_iterate_tool_loop` generator and returns the
+        message carried on the terminal `MessageEnd`. `contextlib.aclosing`
+        guarantees the generator's `finally` clause (which fires
+        `Speculator.end`) runs before we return — without it, the generator
+        would remain suspended at the `yield MessageEnd(...)` and the
+        speculator cleanup would only happen at GC time, breaking the
+        per-iteration `begin`/`end` contract.
+        """
+        async with aclosing(self._iterate_tool_loop(agent, messages)) as events:
+            async for event in events:
+                if isinstance(event, MessageEnd):
+                    return event.message
+        # `_iterate_tool_loop` raises `RuntimeError` when `max_iterations`
+        # is exhausted before any terminal stop reason, so this branch is
+        # only reachable if the generator returns without yielding
+        # `MessageEnd` — which would be a programming error in the loop.
+        raise RuntimeError("AnthropicRunner._iterate_tool_loop exited without yielding MessageEnd.")
+
+    async def run_stream(
+        self,
+        agent: SubAgent,
+        messages: list[Message],
+    ) -> AsyncIterator[StreamEvent]:
+        """Run the same tool-use loop as `__call__` but yield streaming
+        events as the model generates.
+
+        Yield order, per iteration:
+        - `TextDelta(text=...)` — once per SDK `text` delta event.
+        - `ToolUseStart(call=...)` — once per `content_block_stop` for
+          a tool_use block, *after* speculator.observe but *before*
+          the runner's hook + dispatch cycle.
+        - `ToolUseEnd(call=..., result=...)` — once per dispatched
+          tool call, after the result is finalized.
+
+        At the very end (`end_turn` / `stop_sequence` / `pause_turn` /
+        `refusal`), yields exactly one `MessageEnd(message=...)` and
+        returns. `MessageEnd.message` matches what `__call__` would
+        have returned.
+        """
+        async for event in self._iterate_tool_loop(agent, messages):
+            yield event
+
+    async def _iterate_tool_loop(
+        self,
+        agent: SubAgent,
+        messages: list[Message],
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Shared tool-use-loop state machine driving both surfaces.
+
+        Yields the public `StreamEvent` types as the loop progresses. The
+        terminal yield is always exactly one `MessageEnd(message=...)`
+        before normal return; consumers that only need the final message
+        (`__call__`) collect that one event, consumers that want the
+        streaming play-by-play (`run_stream`) forward everything.
+
+        The shape mirrors the previous `run_stream` body almost
+        verbatim — the win is dedup, not redesign. Behavior contract
+        pinned by `tests/runner/test_anthropic_pin_parity.py`.
+        """
         api_messages, system = _translate_in(messages)
         request = self._build_request(agent, api_messages, system)
 
@@ -197,6 +369,19 @@ class AnthropicRunner:
         running_history: list[Message] = list(messages)
 
         for _ in range(self._max_iterations):
+            # Surface the cache-breakpoint cap before any IO so the caller
+            # gets a clear typed error instead of an opaque API 400. Per
+            # iteration because tool_results we feed back may themselves
+            # carry `cache_control`.
+            count = _count_cache_breakpoints(request)
+            if count > _CACHE_BREAKPOINT_LIMIT:
+                raise CacheBreakpointLimitExceeded(
+                    f"Anthropic caps cache breakpoints at "
+                    f"{_CACHE_BREAKPOINT_LIMIT}; got {count}. "
+                    "Remove some `ContentBlock.cache=True` markers, or "
+                    "use `harness.prompts.compact` to trim the prefix."
+                )
+
             if self._prefix_watcher is not None:
                 await self._prefix_watcher.fingerprint(request)
 
@@ -209,20 +394,79 @@ class AnthropicRunner:
                 )
 
             try:
-                async with self._client.messages.stream(**request) as stream:
+                async with self._stream_with_timeout(request) as stream:
+                    async for event in stream:
+                        # Text deltas: yield as TextDelta.
+                        event_type = getattr(event, "type", None)
+                        if event_type == "text":
+                            text_value = getattr(event, "text", None)
+                            if text_value:
+                                yield TextDelta(text=text_value)
+                            continue
+
+                        # tool_use block done: surface to speculator so it
+                        # can mark matching pending speculations as
+                        # observed BEFORE the runner dispatches, then
+                        # yield `ToolUseStart` so streaming consumers can
+                        # react before dispatch. The dispatch itself
+                        # happens after `get_final_message` returns.
+                        if (
+                            event_type == "content_block_stop"
+                            and getattr(getattr(event, "content_block", None), "type", None)
+                            == "tool_use"
+                        ):
+                            block = event.content_block
+                            call = ToolCall(
+                                name=block.name,
+                                arguments=dict(block.input),
+                                id=block.id,
+                            )
+                            if self._speculator is not None:
+                                await self._speculator.observe(call)
+                            yield ToolUseStart(call=call)
                     response = await stream.get_final_message()
+
+                # Stream is now fully arrived. Cancel any pending
+                # speculations the model didn't claim, before we move on
+                # to dispatching its emitted tool_use blocks. This frees
+                # the handler runtime that would otherwise burn through
+                # the dispatch phase until `end()` finally cancels it.
+                # `end()` (in the finally block) still acts as a safety
+                # net for anything still pending.
+                if self._speculator is not None:
+                    await self._speculator.cancel_unobserved()
 
                 assistant_message = _translate_out(response)
                 running_history.append(assistant_message)
                 await self.hooks.emit(PostAssistantMessage(message=assistant_message))
 
+                # Terminal stop reasons: emit MessageEnd and return.
                 if response.stop_reason in ("end_turn", "stop_sequence"):
-                    return assistant_message
+                    yield MessageEnd(message=assistant_message)
+                    return
+
+                if response.stop_reason == "pause_turn":
+                    # Server-side pause (typically a long-running tool
+                    # exceeded the per-turn budget). Surface as an event
+                    # and emit the partial assistant message; the caller
+                    # can re-invoke with this message appended to resume.
+                    await self.hooks.emit(PauseTurn(message=assistant_message, reason="pause_turn"))
+                    yield MessageEnd(message=assistant_message)
+                    return
+
+                if response.stop_reason == "refusal":
+                    # The model refused. Surface as an event and emit
+                    # the refusal-only assistant message; the caller can
+                    # inspect blocks and decide what to do.
+                    await self.hooks.emit(Refusal(message=assistant_message))
+                    yield MessageEnd(message=assistant_message)
+                    return
 
                 if response.stop_reason != "tool_use":
                     raise RuntimeError(
                         f"Unexpected stop_reason from model: {response.stop_reason!r}. "
-                        "AnthropicRunner does not handle 'pause_turn' or 'refusal' yet."
+                        "Known reasons handled: end_turn, stop_sequence, tool_use, "
+                        "pause_turn, refusal."
                     )
 
                 request["messages"] = [
@@ -248,17 +492,52 @@ class AnthropicRunner:
                     if speculative_result is not None:
                         result = speculative_result
                     else:
-                        decisions = await self.hooks.emit(PreToolUse(call=call))
-                        blocked = next((d for d in decisions if d.block), None)
+                        pre_decisions = await self.hooks.emit(PreToolUse(call=call))
+                        # PreToolUse hook decisions: `block` short-circuits
+                        # to an is_error result; `replacement=ToolResult(...)`
+                        # short-circuits dispatch with the supplied result
+                        # (id patched to the model's call id). First matching
+                        # decision wins.
+                        blocked = next((d for d in pre_decisions if d.block), None)
+                        replaced = next(
+                            (d for d in pre_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
                         if blocked is not None:
                             result = ToolResult(
                                 id=block.id,
                                 content=blocked.reason or "blocked by hook",
                                 is_error=True,
                             )
+                        elif replaced is not None:
+                            assert isinstance(replaced.replacement, ToolResult)
+                            result = ToolResult(
+                                id=block.id,
+                                content=replaced.replacement.content,
+                                is_error=replaced.replacement.is_error,
+                            )
                         else:
                             result = await self.dispatcher.dispatch(call)
-                        await self.hooks.emit(PostToolUse(call=call, result=result))
+
+                        post_decisions = await self.hooks.emit(
+                            PostToolUse(call=call, result=result)
+                        )
+                        # PostToolUse can rewrite the result before it goes
+                        # back to the model — typical use is sanitization
+                        # (redact secrets in the result, normalize errors).
+                        post_replacement = next(
+                            (d for d in post_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
+                        if post_replacement is not None:
+                            assert isinstance(post_replacement.replacement, ToolResult)
+                            result = ToolResult(
+                                id=block.id,
+                                content=post_replacement.replacement.content,
+                                is_error=post_replacement.replacement.is_error,
+                            )
+
+                    yield ToolUseEnd(call=call, result=result)
 
                     tool_result_blocks.append(
                         {
@@ -287,3 +566,75 @@ class AnthropicRunner:
             f"Tool-use loop exceeded max_iterations={self._max_iterations}. "
             "Increase the cap, constrain the tool surface, or shorten the conversation."
         )
+
+    def _stream_with_timeout(self, request: dict[str, Any]) -> Any:
+        """Return a stream context manager, optionally wrapped in a timeout.
+
+        When `timeout_s` is None we hand back the SDK's own context manager
+        unchanged. When set, we wrap entry + exit + iteration in
+        `asyncio.wait_for` via a small adapter. Keeping the wrap in a
+        helper rather than inlining it keeps the iteration loop body
+        readable.
+        """
+        ctx = self.client.messages.stream(**request)
+        if self._timeout_s is None:
+            return ctx
+        return _TimeoutStreamCtx(ctx, self._timeout_s)
+
+
+class _TimeoutStreamCtx:
+    """Wraps an Anthropic stream context manager with a per-iteration timeout.
+
+    `asyncio.wait_for` enforces the deadline on every awaited operation
+    (`__aenter__`, every `async for` step inside, `__aexit__`). If the
+    deadline expires the SDK call is cancelled and `TimeoutError` bubbles
+    up so the caller can decide whether to retry / give up.
+    """
+
+    def __init__(self, inner: Any, timeout_s: float) -> None:
+        self._inner = inner
+        self._timeout_s = timeout_s
+        self._stream: Any | None = None
+
+    async def __aenter__(self) -> Any:
+        self._stream = await asyncio.wait_for(self._inner.__aenter__(), timeout=self._timeout_s)
+        return _TimeoutStream(self._stream, self._timeout_s)
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
+        try:
+            return await asyncio.wait_for(
+                self._inner.__aexit__(exc_type, exc, tb), timeout=self._timeout_s
+            )
+        except TimeoutError:
+            # M1.11: teardown took longer than `timeout_s`. The inner
+            # __aexit__ task has been cancelled by `wait_for`, so the
+            # SDK's httpx connection is now in an indeterminate state —
+            # very likely stuck mid-stream. Swallowing the timeout would
+            # leave the next request inheriting that stuck connection.
+            # Log at WARNING and propagate so the caller knows the
+            # request did not tear down cleanly. The original exception
+            # (if any) is preserved as the implicit context (PEP 3134).
+            logger.warning(
+                "Anthropic stream teardown exceeded timeout_s=%s; "
+                "propagating TimeoutError. The underlying connection may "
+                "be in an indeterminate state.",
+                self._timeout_s,
+            )
+            raise
+
+
+class _TimeoutStream:
+    """Iterator wrapper that applies the timeout to each `__anext__` call."""
+
+    def __init__(self, inner: Any, timeout_s: float) -> None:
+        self._inner = inner
+        self._timeout_s = timeout_s
+
+    def __aiter__(self) -> _TimeoutStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        return await asyncio.wait_for(self._inner.__anext__(), timeout=self._timeout_s)
+
+    async def get_final_message(self) -> Any:
+        return await asyncio.wait_for(self._inner.get_final_message(), timeout=self._timeout_s)

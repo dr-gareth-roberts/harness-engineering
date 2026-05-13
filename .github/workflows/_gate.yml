@@ -1,0 +1,237 @@
+name: gate (reusable)
+
+# Reusable workflow that encapsulates the shared lint/type/test/docs
+# gate plus the base-install smoke. Both `ci.yml` (matrix across
+# 3.11 / 3.12 / 3.13) and `release.yml` (tagged commit, single Python)
+# call this via `uses: ./.github/workflows/_gate.yml` — one place to
+# add a gate step, both pipelines pick it up. Eliminates the
+# gate-drift class M1.2 fixed by hand (the codeblock gate was
+# previously only on `ci.yml`).
+#
+# Permissions and `env:` do NOT inherit from the caller in reusable
+# workflows — they're explicitly declared here. See:
+# https://docs.github.com/en/actions/using-workflows/reusing-workflows
+#
+# `UV_NO_SYNC=1` keeps `uv run` from re-deriving the dependency set on
+# every invocation (which would drop the dev / vendor extras the
+# previous `uv sync --extra …` step installed). `UV_PYTHON` pins the
+# Python `uv run` resolves against so the matrix's Python wins over
+# `.python-version` (3.11).
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python version to drive the gate on."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  UV_NO_SYNC: "1"
+  UV_PYTHON: ${{ inputs.python-version }}
+
+jobs:
+  gate:
+    name: gate (py${{ inputs.python-version }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          # Pin the uv version so a uv release doesn't silently change
+          # CI behavior. Bump deliberately when needed.
+          version: "0.5.x"
+          enable-cache: true
+
+      - name: Set up Python ${{ inputs.python-version }}
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+        run: uv python install "$PYTHON_VERSION"
+
+      - name: Sync dependencies
+        # All extras the gate needs to validate. We don't include
+        # `attribute` in CI because sentence-transformers pulls torch
+        # (~1GB), and the module's lazy-import contract is verified by
+        # the dual-state mypy test rather than by running CI with it
+        # installed.
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+        run: |
+          uv sync \
+            --python "$PYTHON_VERSION" \
+            --extra dev \
+            --extra anthropic \
+            --extra openai-compat \
+            --extra otel \
+            --extra fuzz \
+            --extra docs
+
+      - name: ruff check
+        run: uv run ruff check src tests examples
+
+      - name: ruff format check
+        run: uv run ruff format --check src tests examples
+
+      - name: mypy strict (src + tests)
+        run: uv run mypy --strict src tests
+
+      - name: pytest
+        # `--cov` enables coverage collection (configured in pyproject.toml).
+        # The `fail_under` threshold there gates on a drop.
+        run: uv run pytest -q --cov=harness
+
+      - name: pytest --codeblocks (docs gate)
+        # Extracts and runs the runnable Python blocks across the
+        # showcase docs (`quickstart.md`, `index.md`) AND every
+        # cookbook + module page. Non-runnable blocks (bash,
+        # illustrative sketches, snippets referencing undefined names)
+        # carry an explicit `<!--pytest.mark.skip-->` comment
+        # immediately above them, with a sibling `<!-- reason: … -->`
+        # justification. Catches doc/source API drift before readers do.
+        run: |
+          uv run pytest --codeblocks \
+            docs/quickstart.md \
+            docs/index.md \
+            docs/cookbook/*.md \
+            docs/modules/*.md
+
+      - name: mkdocs build (strict)
+        run: uv run mkdocs build --strict
+
+      - name: uv build
+        # Verifies wheel + sdist build cleanly with the current source
+        # tree. Catches packaging-level breakage that tests would miss
+        # (e.g., missing files in the wheel because hatchling didn't
+        # pick them up).
+        run: uv build
+
+  base-install-smoke:
+    # Verifies the base distribution (no extras) yields a working
+    # `harness` import surface — every name in `__all__` resolves
+    # (eagerly or via the lazy `__getattr__`), every module imports
+    # cleanly or raises an actionable ImportError, and the `harness`
+    # CLI runs. Catches a release that breaks base-install before it
+    # publishes to PyPI.
+    #
+    # Runs in a fresh venv with NO extras installed — a real
+    # "first user does `pip install harness-engineering-toolkit`"
+    # simulation. The job intentionally does not depend on the `gate`
+    # job so it runs in parallel; both must pass.
+    name: base-install smoke (py${{ inputs.python-version }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+          enable-cache: true
+
+      - name: Set up Python ${{ inputs.python-version }}
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+        run: uv python install "$PYTHON_VERSION"
+
+      - name: Create base-only venv and install harness (no extras)
+        # `uv pip install .` resolves the dist from pyproject without
+        # any optional extras — exactly what a user gets with
+        # `pip install harness-engineering-toolkit`.
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+        run: |
+          uv venv .venv-base --python "$PYTHON_VERSION"
+          uv pip install --python .venv-base/bin/python .
+
+      - name: Smoke — import surface, lazy ImportError, CLI
+        # The script runs inside the bare base venv we just
+        # provisioned. No env-interpolated user input flows into the
+        # shell; the Python heredoc is closed-quoted so it isn't
+        # subject to shell expansion either.
+        run: |
+          .venv-base/bin/python - <<'PY'
+          import re
+          import subprocess
+          import pathlib
+
+          import harness
+
+          # 1. Version matches pyproject.
+          pyproject = pathlib.Path("pyproject.toml").read_text()
+          match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
+          assert match is not None, "no version in pyproject.toml"
+          expected = match.group(1)
+          assert harness.__version__ == expected, (
+              f"harness.__version__ ({harness.__version__}) "
+              f"!= pyproject version ({expected})"
+          )
+
+          # 2. Every name in harness.__all__ resolves. Vendor-extra
+          #    names (AnthropicRunner / OpenAICompatRunner) load lazily
+          #    and raise ImportError; OpenTelemetrySink loads but its
+          #    constructor raises ImportError.
+          extra_message_fragments = {
+              "AnthropicRunner": "'harness-engineering-toolkit[anthropic]'",
+              "OpenAICompatRunner": "'harness-engineering-toolkit[openai-compat]'",
+              "OpenTelemetrySink": "[otel]",
+          }
+          for name in harness.__all__:
+              try:
+                  value = getattr(harness, name)
+              except ImportError as exc:
+                  frag = extra_message_fragments.get(name)
+                  assert frag is not None, (
+                      f"{name} raised ImportError but is not in the "
+                      f"documented extras-gated set: {exc}"
+                  )
+                  assert frag in str(exc), (
+                      f"{name} ImportError missing actionable install "
+                      f"hint {frag!r}: {exc}"
+                  )
+                  continue
+              # OpenTelemetrySink imports clean; constructor raises.
+              if name == "OpenTelemetrySink":
+                  try:
+                      value()
+                  except ImportError as exc:
+                      assert "[otel]" in str(exc), (
+                          f"OpenTelemetrySink() ImportError missing "
+                          f"actionable install hint '[otel]': {exc}"
+                      )
+                  else:
+                      raise AssertionError(
+                          "OpenTelemetrySink() succeeded without the "
+                          "[otel] extra installed"
+                      )
+
+          # 3. Submodules that ship in base import cleanly. Their
+          #    extras-gated callables raise on use, not on import.
+          for modname in (
+              "harness.fuzz",
+              "harness.attribute",
+              "harness.privacy",
+              "harness.telemetry.otel",
+          ):
+              __import__(modname)
+
+          # 4. `harness` console script lists the subcommands.
+          help_proc = subprocess.run(
+              [".venv-base/bin/harness", "--help"],
+              capture_output=True,
+              text=True,
+              check=True,
+          )
+          assert "cache-audit" in help_proc.stdout, (
+              f"`harness --help` missing 'cache-audit': {help_proc.stdout}"
+          )
+          assert "debug" in help_proc.stdout, (
+              f"`harness --help` missing 'debug': {help_proc.stdout}"
+          )
+
+          print("base-install smoke: OK")
+          PY

@@ -1,0 +1,72 @@
+name: Release
+
+# Tag-triggered. Build wheel + sdist, run the gate one more time
+# against the tagged commit (so a CI-green main can't drift before
+# release), then publish to PyPI via OIDC trusted publishing — no
+# API token in the repo.
+#
+# One-time setup on PyPI's side: at
+# https://pypi.org/manage/account/publishing/, configure a trusted
+# publisher for `harness-engineering-toolkit` with:
+#   - owner: dr-gareth-roberts
+#   - repository: harness-engineering
+#   - workflow: release.yml
+#   - environment: pypi
+#
+# The `pypi` environment below matches; once configured, tag pushes
+# of the form vX.Y.Z trigger this workflow and publish.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Re-run the same gate CI runs (lint, type, test, codeblocks, mkdocs,
+  # build) plus the base-install smoke against the tagged commit. Don't
+  # ship a release that wouldn't have passed CI — even if the tagged
+  # commit is on `main`, a stale CI run is not the same as a fresh gate
+  # against the exact ref we're publishing. Pinned to 3.12 for release
+  # builds; the matrix across 3.11 / 3.12 / 3.13 lives in `ci.yml`.
+  gate:
+    uses: ./.github/workflows/_gate.yml
+    with:
+      python-version: "3.12"
+
+  build-and-publish:
+    name: build + publish to PyPI
+    needs: gate
+    runs-on: ubuntu-latest
+    # The `pypi` environment is what PyPI's trusted publisher
+    # configuration matches against. It also gates the publish step
+    # behind any environment protection rules the repo defines
+    # (e.g., manual approval for production tags).
+    environment:
+      name: pypi
+      url: https://pypi.org/p/harness-engineering-toolkit
+    permissions:
+      # Once a job specifies any permission, all other permissions reset
+      # to `none` — the workflow-level `contents: read` default no
+      # longer applies. Without `contents: read` here,
+      # `actions/checkout@v4` fails with "Repository not found" before
+      # OIDC ever gets to run.
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+      - run: uv build
+      - name: Publish to PyPI
+        # Pinning the action to a commit-equivalent tag (release/v1)
+        # rather than a SHA because the action is maintained by PyPA
+        # and the tag is what their docs guide to; SHAs are an option
+        # if a stricter supply-chain posture is needed.
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

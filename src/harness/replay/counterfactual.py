@@ -50,11 +50,19 @@ class RewriteTurn:
 
 @dataclass(frozen=True)
 class InsertTurn:
-    """Insert `new_message` after `original.messages[after]`.
+    """Truncate the session after `after` and append `new_message`.
 
-    The new message lands at index `after + 1`; everything originally at
-    that index or later is dropped, and the runner produces a fresh
-    continuation. `after = -1` inserts at the very start.
+    Despite the name, this is **not** a true splice-insertion: the runner
+    is then asked to produce a fresh continuation, and subsequent turns
+    from the original session are **not** preserved. Effectively a
+    "branch at index `after + 1`" operation — equivalent to
+    `RewriteTurn(index=after + 1, new_message=...)` except that
+    `after = -1` is allowed (inserts at the very start).
+
+    Semantically true insertion (preserving the tail until the runner
+    consumes or rewrites it) is roadmap item M3; for v1.x the name is
+    retained for backwards compatibility and the docstring is the source
+    of truth on behaviour. See `audit/RELEASE-TODO.md` item M2.8.
     """
 
     after: int
@@ -115,6 +123,11 @@ def _apply_mutation(messages: list[Message], mutation: Mutation) -> list[Message
                 f"session with {len(messages)} messages "
                 f"(use -1 to insert at the start)"
             )
+        # InsertTurn semantics: truncate-then-append, not true splice-insert.
+        # We keep the prefix `messages[:after + 1]`, append `new_message`,
+        # and drop everything originally at `after + 1` or later. The runner
+        # produces a fresh continuation; the original tail is NOT preserved.
+        # See the class docstring and roadmap item M2.8 for the rationale.
         cut = mutation.after + 1
         return [*messages[:cut], mutation.new_message]
 

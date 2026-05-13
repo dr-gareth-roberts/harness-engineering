@@ -9,8 +9,13 @@ when a local `base_url` is supplied — local servers usually don't check
 it).
 
 Caveats (mirroring `AnthropicRunner`):
-- `HookDecision.replacement` is ignored; only `block` is honoured.
+- `HookDecision` honors `block` (short-circuit to is_error result) and
+  `replacement` (PreToolUse: skip dispatch, use supplied result;
+  PostToolUse: rewrite the dispatched result before sending back).
 - Stop reasons other than `stop`/`length`/`tool_calls` raise `RuntimeError`.
+  OpenAI's `content_filter` is not currently surfaced as an event;
+  callers will see it as `RuntimeError` until parity with the
+  AnthropicRunner pause_turn/refusal events ships.
 - `cache_control` markers from `harness.prompts` have no effect — the
   OpenAI Chat Completions API has no equivalent (caching is server-side
   / opaque on most providers).
@@ -20,7 +25,9 @@ Caveats (mirroring `AnthropicRunner`):
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 try:
@@ -28,7 +35,7 @@ try:
 except ImportError as exc:
     raise ImportError(
         "harness.runner.openai_compat requires the openai SDK. "
-        "Install with: pip install 'harness-engineering[openai-compat]'"
+        "Install with: pip install 'harness-engineering-toolkit[openai-compat]'"
     ) from exc
 
 from harness.agents.definition import SubAgent
@@ -38,6 +45,8 @@ from harness.prompts.messages import ContentBlock, Message, text
 from harness.runner.protocols import PrefixWatcherProtocol, SpeculatorProtocol
 from harness.tools.dispatcher import Dispatcher
 from harness.tools.schema import ToolCall, ToolResult
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_tool_content(content: Any) -> str:
@@ -68,12 +77,15 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
 
     OpenAI uses a flat list with role-based dispatch:
     - system → {"role": "system", "content": str}
-    - user → {"role": "user", "content": str}
+    - user → {"role": "user", "content": str | list[part]}
     - assistant → {"role": "assistant", "content": str, "tool_calls": [...]?}
     - tool result → {"role": "tool", "tool_call_id": str, "content": str}
 
-    System messages and tool_use blocks live on different message types, so
-    we split a harness Message into multiple API entries when necessary.
+    User messages may have a *list* `content` containing text and image
+    parts when image blocks are present (Wave 12 #7); otherwise content
+    is a plain string. System messages and tool_use blocks live on
+    different message types, so we split a harness Message into
+    multiple API entries when necessary.
     """
     out: list[dict[str, Any]] = []
     for msg in messages:
@@ -84,6 +96,7 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
             continue
 
         text_parts: list[str] = []
+        image_parts: list[dict[str, Any]] = []
         tool_uses: list[ToolCall] = []
         tool_results: list[ToolResult] = []
         for block in msg.content:
@@ -93,13 +106,35 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
                 tool_uses.append(block.tool_use)
             elif block.type == "tool_result" and block.tool_result is not None:
                 tool_results.append(block.tool_result)
+            elif block.type == "image" and block.image is not None:
+                # OpenAI vision shape (Wave 12 #7): image_url parts
+                # carry either a data URL (`data:<media>;base64,<data>`)
+                # or a remote URL. The model decodes / fetches.
+                if block.image.source == "base64":
+                    url = f"data:{block.image.media_type};base64,{block.image.data}"
+                else:
+                    url = block.image.data
+                image_parts.append({"type": "image_url", "image_url": {"url": url}})
+            elif block.type == "file" and block.file_id is not None:
+                # OpenAI doesn't have a direct equivalent of Anthropic's
+                # Files API document blocks. Surface the file_id as a
+                # text placeholder so the model at least sees the
+                # reference; users on OpenAI should keep using
+                # path-based attach_file for inline content.
+                text_parts.append(f"<file file_id={block.file_id}>")
             elif block.type == "file":
                 text_parts.append(f"<file path={block.path}>\n{block.text or ''}\n</file>")
 
         if msg.role == "assistant":
+            joined_assistant_text = "".join(text_parts)
+            # M1.10: some OpenAI-compatible backends (vLLM, llama.cpp)
+            # reject assistant messages that carry neither text content
+            # nor tool_calls. Drop empty rows before they hit the wire.
+            if not joined_assistant_text and not tool_uses:
+                continue
             entry: dict[str, Any] = {
                 "role": "assistant",
-                "content": "".join(text_parts),
+                "content": joined_assistant_text,
             }
             if tool_uses:
                 entry["tool_calls"] = [
@@ -123,7 +158,17 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
                         "content": _serialize_tool_content(tr.content),
                     }
                 )
-            if text_parts:
+            if image_parts:
+                # Mixed text + image → list-shaped content. Wrap the
+                # text concat (if any) as a single text part so the
+                # ordering text-first / images-after stays predictable.
+                content_parts: list[dict[str, Any]] = []
+                joined_text = "".join(text_parts)
+                if joined_text:
+                    content_parts.append({"type": "text", "text": joined_text})
+                content_parts.extend(image_parts)
+                out.append({"role": "user", "content": content_parts})
+            elif text_parts:
                 out.append({"role": "user", "content": "".join(text_parts)})
 
     return out
@@ -182,6 +227,7 @@ class OpenAICompatRunner:
         max_iterations: int = 10,
         prefix_watcher: PrefixWatcherProtocol | None = None,
         speculator: SpeculatorProtocol | None = None,
+        timeout_s: float | None = None,
     ) -> None:
         self.dispatcher = dispatcher
         self.hooks = hooks
@@ -201,6 +247,11 @@ class OpenAICompatRunner:
         self._max_iterations = max_iterations
         self._prefix_watcher = prefix_watcher
         self._speculator = speculator
+        # Per-iteration timeout. None = no timeout (default; matches the
+        # SDK's own behavior). When set, the chat-completions create call
+        # is wrapped in `asyncio.wait_for`. Retry/backoff is intentionally
+        # deferred (Wave 10 — see docs/plan.md).
+        self._timeout_s = timeout_s
 
     def _build_request(
         self,
@@ -222,7 +273,13 @@ class OpenAICompatRunner:
 
     async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
         all_messages: list[Message] = []
-        if agent.system_prompt:
+        # M1.25: if the caller already supplied a system message, honor
+        # it rather than shipping two system blocks (the agent's prompt
+        # plus the caller's). OpenAI-compatible servers vary in how
+        # they handle duplicate system rows — some concatenate, some
+        # error, some only honor the first. Caller wins.
+        caller_has_system = any(m.role == "system" for m in messages)
+        if agent.system_prompt and not caller_has_system:
             all_messages.append(text("system", agent.system_prompt))
         all_messages.extend(messages)
 
@@ -250,13 +307,42 @@ class OpenAICompatRunner:
                 )
 
             try:
-                response = await self._client.chat.completions.create(**request)
+                create_call = self._client.chat.completions.create(**request)
+                if self._timeout_s is not None:
+                    response = await asyncio.wait_for(create_call, timeout=self._timeout_s)
+                else:
+                    response = await create_call
                 choice = response.choices[0]
                 finish_reason = choice.finish_reason
 
                 assistant_message = _translate_out(choice.message)
                 running_history.append(assistant_message)
                 await self.hooks.emit(PostAssistantMessage(message=assistant_message))
+
+                tool_calls = list(choice.message.tool_calls or [])
+
+                # Speculator surface (Wave 10 #3): observe each emitted
+                # tool_call BEFORE the early-return for stop/length so a
+                # text-only response still triggers cancel_unobserved on
+                # whatever specs were launched. Mirrors AnthropicRunner
+                # Wave 6 cancellation timing — observe before dispatch,
+                # cancel before dispatch (and before the early return).
+                if self._speculator is not None:
+                    for tc in tool_calls:
+                        if tc.type != "function":
+                            continue
+                        try:
+                            obs_args = json.loads(tc.function.arguments)
+                        except ValueError:
+                            obs_args = {}
+                        await self._speculator.observe(
+                            ToolCall(
+                                name=tc.function.name,
+                                arguments=obs_args,
+                                id=tc.id,
+                            )
+                        )
+                    await self._speculator.cancel_unobserved()
 
                 if finish_reason in ("stop", "length"):
                     return assistant_message
@@ -272,7 +358,6 @@ class OpenAICompatRunner:
                     "role": "assistant",
                     "content": choice.message.content or "",
                 }
-                tool_calls = list(choice.message.tool_calls or [])
                 if tool_calls:
                     assistant_entry["tool_calls"] = [
                         {
@@ -292,10 +377,36 @@ class OpenAICompatRunner:
                 for tc in tool_calls:
                     if tc.type != "function":
                         continue
+                    # M1.24: surface malformed tool-call JSON as a visible
+                    # error in the trajectory rather than silently calling
+                    # the tool with empty args. The synthesized ToolResult
+                    # goes back to the model so it can self-correct, and
+                    # we skip both the hook cycle and the dispatch.
                     try:
                         arguments = json.loads(tc.function.arguments)
-                    except ValueError:
-                        arguments = {}
+                    except ValueError as exc:
+                        logger.warning(
+                            "malformed tool-call JSON for %s (id=%s): %s",
+                            tc.function.name,
+                            tc.id,
+                            exc,
+                        )
+                        result = ToolResult(
+                            id=tc.id,
+                            content=f"malformed tool-call JSON: {exc}",
+                            is_error=True,
+                        )
+                        tool_result_entries.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": _serialize_tool_content(result.content),
+                            }
+                        )
+                        synthesized_result_blocks.append(
+                            ContentBlock(type="tool_result", tool_result=result)
+                        )
+                        continue
 
                     call = ToolCall(name=tc.function.name, arguments=arguments, id=tc.id)
 
@@ -310,17 +421,48 @@ class OpenAICompatRunner:
                     if speculative_result is not None:
                         result = speculative_result
                     else:
-                        decisions = await self.hooks.emit(PreToolUse(call=call))
-                        blocked = next((d for d in decisions if d.block), None)
+                        pre_decisions = await self.hooks.emit(PreToolUse(call=call))
+                        # PreToolUse hook decisions: `block` short-circuits
+                        # to an is_error result; `replacement=ToolResult(...)`
+                        # short-circuits dispatch with the supplied result
+                        # (id patched to the model's call id). First match wins.
+                        blocked = next((d for d in pre_decisions if d.block), None)
+                        replaced = next(
+                            (d for d in pre_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
                         if blocked is not None:
                             result = ToolResult(
                                 id=tc.id,
                                 content=blocked.reason or "blocked by hook",
                                 is_error=True,
                             )
+                        elif replaced is not None:
+                            assert isinstance(replaced.replacement, ToolResult)
+                            result = ToolResult(
+                                id=tc.id,
+                                content=replaced.replacement.content,
+                                is_error=replaced.replacement.is_error,
+                            )
                         else:
                             result = await self.dispatcher.dispatch(call)
-                        await self.hooks.emit(PostToolUse(call=call, result=result))
+
+                        post_decisions = await self.hooks.emit(
+                            PostToolUse(call=call, result=result)
+                        )
+                        # PostToolUse can rewrite the result before it goes
+                        # back to the model — typical use is sanitization.
+                        post_replacement = next(
+                            (d for d in post_decisions if isinstance(d.replacement, ToolResult)),
+                            None,
+                        )
+                        if post_replacement is not None:
+                            assert isinstance(post_replacement.replacement, ToolResult)
+                            result = ToolResult(
+                                id=tc.id,
+                                content=post_replacement.replacement.content,
+                                is_error=post_replacement.replacement.is_error,
+                            )
 
                     tool_result_entries.append(
                         {

@@ -15,16 +15,38 @@ caller -> messages -+--> [outbound scan] --> inner runner -> message
 
 Scope
 -----
-The boundary scans three content shapes: `text` blocks, `tool_use.arguments`
-(walked recursively to find string leaves), and `tool_result.content` (also
-walked recursively when its value is a dict / list — string-typed content
-is scanned directly).
+The boundary scans the following content shapes:
+
+- `text` blocks — the `text` field.
+- `tool_use.arguments` — walked recursively to find string leaves.
+- `tool_result.content` — walked recursively when its value is a dict /
+  list; string-typed content is scanned directly.
+- `image` blocks — image *metadata* only: the URL string (when
+  ``image.source == "url"``) and the ``media_type`` field. The base64
+  payload of an inline image is **not** scanned (that would require
+  OCR and is out of scope; see "Multimodal limits" below).
+- `file` blocks — file *metadata* only: the ``file_id`` and ``path``
+  fields. The file body fetched by the model later (via the vendor's
+  Files API) crosses the boundary outside this layer and is **not**
+  scanned here.
 
 Recursion into structured tool_use / tool_result values is capped at
 `_MAX_RECURSION_DEPTH` levels deep. Nodes deeper than the cap are
 stringified via `json.dumps(default=str, sort_keys=True)` and scanned as a
 single flat blob — detection still works, but the audit event's location
 is annotated `[depth-cap]` rather than carrying a nested path.
+
+Multimodal limits
+-----------------
+The boundary is a string-level detector pipeline. It does **not** decode
+image bytes or read file bodies. Callers that need image-text scanning
+should run an OCR pre-pass over the image *before* the message reaches the
+boundary (e.g. construct the image block with
+:func:`harness.prompts.attach_image` *and* materialize OCR-extracted text
+into a sibling `text` block; the boundary then scans the OCR output as
+normal text). Callers that need file-body scanning should fetch and
+inline the file's text into a `text` block before the boundary, rather
+than rely on the runner's later Files API resolution.
 
 Location-path grammar
 ---------------------
@@ -38,18 +60,23 @@ found. Format:
     messages[i].content[j].tool_result.content                   — string-typed
     messages[i].content[j].tool_result.content.<key>             — nested
     messages[i].content[j].tool_result.content[depth-cap]        — capped
+    messages[i].content[j].image.url                             — image URL (url-sourced)
+    messages[i].content[j].image.media_type                      — image mime type
+    messages[i].content[j].file_id                               — file block id
+    messages[i].content[j].path                                  — file/image path metadata
 
 Top-level tool-call args dicts use plain `.<key>`; nested keys chain with
 `.`; list elements use `[n]`. The cap suffix appears only when recursion
 exceeded `_MAX_RECURSION_DEPTH`.
 
-Per-detector overrides
-----------------------
-A detector with `action="block"` blocks regardless of `on_detect`. A
-detector with `action="redact"` redacts even when `on_detect="audit"`. The
-boundary's `on_detect` is the *default* shape used by detectors that don't
-override — which today is none of the shipped ones, but external detectors
-may rely on it.
+Dict-key sanitization
+---------------------
+Dict keys themselves can carry sensitive strings (e.g. an API-key-shaped
+string used as a key by a careless caller). Before a key is interpolated
+into the audit-event `location`, it is run through the configured
+detectors and any matching range is replaced with `<redacted>`. The
+inner runner still sees the original key in the arguments dict — only
+the audit-event location is sanitized.
 """
 
 from __future__ import annotations
@@ -59,13 +86,12 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from harness.privacy.detectors import (
-    Action,
     Detection,
     Detector,
     Direction,
 )
 from harness.privacy.events import DetectionEvent
-from harness.prompts.messages import ContentBlock, Message
+from harness.prompts.messages import ContentBlock, ImageRef, Message
 from harness.tools.schema import ToolCall, ToolResult
 
 _MAX_RECURSION_DEPTH = 4
@@ -82,6 +108,39 @@ if TYPE_CHECKING:
 
 
 AuditSink = Callable[[DetectionEvent], Awaitable[None]]
+
+
+def _merge_ranges(detections: list[Detection]) -> list[Detection]:
+    """Greedy-merge overlapping ranges; return one Detection per merged span.
+
+    Sort by `(start, -end)` so when two ranges share a start the wider one
+    sorts first. Then walk left-to-right, merging any range whose `start`
+    is `<= prev.end`. The merged Detection keeps the earlier-and-wider
+    detection's `name`, `direction`, `action`, and `location` — those
+    fields are not used past splice-time for the wider boundary semantics,
+    and the audit events for each individual detection have already been
+    emitted upstream.
+    """
+    if not detections:
+        return []
+    ordered = sorted(detections, key=lambda d: (d.start, -d.end))
+    merged: list[Detection] = [ordered[0]]
+    for det in ordered[1:]:
+        prev = merged[-1]
+        if det.start <= prev.end:
+            if det.end > prev.end:
+                merged[-1] = Detection(
+                    name=prev.name,
+                    start=prev.start,
+                    end=det.end,
+                    direction=prev.direction,
+                    action=prev.action,
+                    location=prev.location,
+                )
+            # else: prev fully covers det — drop det.
+        else:
+            merged.append(det)
+    return merged
 
 
 class PrivacyViolation(RuntimeError):
@@ -108,11 +167,10 @@ class PrivacyBoundary:
     Parameters
     ----------
     detectors:
-        Ordered list of detectors. Order matters when actions differ for
-        overlapping matches: the first detection at a given range wins.
-    on_detect:
-        Default action used for detectors that report `audit` and have no
-        per-detector override. Detector-level `action` always wins.
+        Ordered list of detectors. Detector-level `action` is honored
+        verbatim; when two detectors fire on overlapping ranges, the
+        ranges are merged before redaction so the splice produces clean
+        output (see `_merge_ranges`).
     audit_sink:
         Optional async callable that receives every `DetectionEvent`. The
         sink contract is intentionally narrow — pass `JSONLSink(...).emit`
@@ -123,11 +181,9 @@ class PrivacyBoundary:
         self,
         detectors: list[Detector],
         *,
-        on_detect: Action = "redact",
         audit_sink: AuditSink | None = None,
     ) -> None:
         self._detectors = list(detectors)
-        self._default_action: Action = on_detect
         self._audit_sink = audit_sink
 
     def wrap(self, inner: Runner) -> Runner:
@@ -202,10 +258,116 @@ class PrivacyBoundary:
                     new_blocks.append(block.model_copy(update={"tool_result": new_result}))
                     continue
 
-                # File blocks and other types: pass through.
+                if block.type == "image" and block.image is not None:
+                    new_blocks.append(
+                        await self._scan_image_block(block, base=base, direction=direction)
+                    )
+                    continue
+
+                if block.type == "file":
+                    new_blocks.append(
+                        await self._scan_file_block(block, base=base, direction=direction)
+                    )
+                    continue
+
+                # Unknown block type: pass through unchanged. (All currently
+                # defined types are handled above; this guard exists so that
+                # adding a new `BlockType` literal doesn't silently bypass
+                # the boundary if the new branch is missed in review.)
                 new_blocks.append(block)
             out.append(Message(role=msg.role, content=new_blocks))
         return out
+
+    async def _scan_image_block(
+        self,
+        block: ContentBlock,
+        *,
+        base: str,
+        direction: Direction,
+    ) -> ContentBlock:
+        """Scan image *metadata* and return a (possibly redacted) copy.
+
+        Scans the URL string when ``image.source == "url"`` and always
+        scans ``image.media_type``. The base64 payload of an inline image
+        is **not** decoded or scanned here — that's an OCR problem and is
+        out of scope. Callers needing image-text scanning should run an
+        OCR pre-pass before the message reaches the boundary.
+
+        ``block.path`` (if set) is scanned as a sibling metadata field;
+        its location is ``{base}.path`` to keep the grammar uniform with
+        file blocks.
+        """
+        # `block.image is not None` is the caller's precondition.
+        assert block.image is not None  # noqa: S101 — narrow type for mypy
+
+        new_media_type = await self._scan_text(
+            block.image.media_type,
+            direction=direction,
+            location=f"{base}.image.media_type",
+        )
+
+        # URL-sourced images: scan the URL string. Base64-sourced images
+        # carry their bytes in `data`; we leave that untouched (OCR is
+        # out of scope per the module docstring).
+        if block.image.source == "url":
+            new_data = await self._scan_text(
+                block.image.data,
+                direction=direction,
+                location=f"{base}.image.url",
+            )
+        else:
+            new_data = block.image.data
+
+        new_image = ImageRef(
+            source=block.image.source,
+            media_type=new_media_type,
+            data=new_data,
+        )
+        update: dict[str, Any] = {"image": new_image}
+
+        if block.path is not None:
+            update["path"] = await self._scan_text(
+                block.path,
+                direction=direction,
+                location=f"{base}.path",
+            )
+
+        return block.model_copy(update=update)
+
+    async def _scan_file_block(
+        self,
+        block: ContentBlock,
+        *,
+        base: str,
+        direction: Direction,
+    ) -> ContentBlock:
+        """Scan file *metadata* and return a (possibly redacted) copy.
+
+        Scans ``block.file_id`` and ``block.path``. The file body that
+        the model fetches later (via the vendor's Files API) is **not**
+        read here — that crosses the boundary outside this layer.
+        Callers needing file-body scanning should inline the file's
+        text into a `text` block before the message reaches the boundary.
+        """
+        update: dict[str, Any] = {}
+
+        if block.file_id is not None:
+            update["file_id"] = await self._scan_text(
+                block.file_id,
+                direction=direction,
+                location=f"{base}.file_id",
+            )
+
+        if block.path is not None:
+            update["path"] = await self._scan_text(
+                block.path,
+                direction=direction,
+                location=f"{base}.path",
+            )
+
+        if not update:
+            return block
+        return block.model_copy(update=update)
 
     async def _scan_value(
         self,
@@ -245,7 +407,13 @@ class PrivacyBoundary:
         if isinstance(value, dict):
             new_dict: dict[str, Any] = {}
             for k, v in value.items():
-                sub_location = f"{location}.{k}"
+                # Sanitize the key before composing it into the location
+                # path — a key shaped like a secret would otherwise leak
+                # into `DetectionEvent.location` / `PrivacyViolation.__str__`.
+                # `k` itself is preserved as-is in `new_dict` so the inner
+                # runner sees the original arguments shape.
+                safe_key = self._sanitize_key(str(k), direction=direction)
+                sub_location = f"{location}.{safe_key}"
                 new_dict[k] = await self._scan_value(
                     v,
                     direction=direction,
@@ -311,30 +479,48 @@ class PrivacyBoundary:
         # Apply actions. `block` short-circuits everything else; redact /
         # audit can coexist on the same fragment.
         for det in detections:
-            if self._effective_action(det) == "block":
+            if det.action == "block":
                 raise PrivacyViolation(det)
 
+        # Merge overlapping redaction ranges before splicing. Without this,
+        # two detectors firing on overlapping spans corrupt the output
+        # (the right-to-left splice would double-redact). The merged range
+        # keeps the earlier-and-wider detection's name for `[REDACTED:<name>]`.
+        redactions = _merge_ranges([d for d in detections if d.action == "redact"])
+
         # Redact right-to-left so earlier indices stay valid as we splice.
-        redactions = sorted(
-            (d for d in detections if self._effective_action(d) == "redact"),
-            key=lambda d: d.start,
-            reverse=True,
-        )
-        for det in redactions:
+        for det in sorted(redactions, key=lambda d: d.start, reverse=True):
             text = text[: det.start] + f"[REDACTED:{det.name}]" + text[det.end :]
         return text
 
-    def _effective_action(self, detection: Detection) -> Action:
-        """Resolve the final action for a detection.
+    def _sanitize_key(self, key: str, *, direction: Direction) -> str:
+        """Run a dict key through the configured detectors; redact matches.
 
-        The detection carries the per-detector action (set inside the
-        detector). When that's the boundary fallback `audit` (the default
-        for `EntropyDetector`), the boundary's `on_detect` is *not*
-        applied — the per-detector intent wins. The exception is the
-        deprecated case where a future detector ships without a default,
-        which we intentionally don't have today.
+        Used before composing key strings into the audit-event `location`.
+        The inner runner still sees the original key in the arguments dict
+        — only the structural path that lands in `DetectionEvent.location`
+        and `PrivacyViolation.__str__` is sanitized.
+
+        Block-action detectors do **not** raise here: a dict key that
+        merely looks like a secret is not the same as a value being sent
+        outbound, and raising would surface a different surprise (a block
+        on a key shape with no audit trail for the value beside it). The
+        key is treated as audit-context only.
         """
-        return detection.action
+        if not key:
+            return key
+        detections: list[Detection] = []
+        for detector in self._detectors:
+            for det in detector.scan(key, direction=direction):
+                detections.append(det)
+        if not detections:
+            return key
+        merged = _merge_ranges(detections)
+        # Right-to-left splice keeps earlier indices valid.
+        result = key
+        for det in sorted(merged, key=lambda d: d.start, reverse=True):
+            result = result[: det.start] + "<redacted>" + result[det.end :]
+        return result
 
     async def _emit_event(self, detection: Detection) -> None:
         if self._audit_sink is None:
@@ -342,7 +528,7 @@ class PrivacyBoundary:
         event = DetectionEvent(
             name=detection.name,
             direction=detection.direction,
-            action=self._effective_action(detection),
+            action=detection.action,
             location=detection.location,
             match_length=detection.match_length,
         )

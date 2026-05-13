@@ -12,11 +12,11 @@ The "harness" is everything around the model: prompt assembly, tool wiring, perm
 | ------------------ | ----------------------------------------------------------------------- |
 | `harness.tools`    | Pydantic-backed `Tool` + async `Dispatcher` with validation             |
 | `harness.prompts`  | `Message` / `ContentBlock`, file attachment, last-N compaction, summarization-based compaction |
-| `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit; events: `SessionStart` / `SessionEnd` / `PromptSubmit` / `PreToolUse` / `PostToolUse` / `PostAssistantMessage` / `Stop` |
+| `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit; events: `SessionStart` / `SessionEnd` (emitted by `Orchestrator.run`), `PromptSubmit` (emitted by `Session.send`), `PreToolUse` / `PostToolUse` / `PostAssistantMessage` (emitted by tool-loop runners), `Stop` |
 | `harness.policy`   | `AllowList` / `DenyList` / `ArgumentMatcher` policies for tool calls    |
 | `harness.agents`   | `SubAgent` + `Orchestrator` that emits lifecycle hooks (model-agnostic) |
 | `harness.runner`   | Pluggable runners satisfying the `Runner` protocol: `EchoRunner` / `CannedRunner` (no deps), `AnthropicRunner` (extra `[anthropic]`), `OpenAICompatRunner` for OpenAI / vLLM / Ollama / llama.cpp / LM Studio (extra `[openai-compat]`); structural `prefix_watcher` / `speculator` extension kwargs |
-| `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator. `OpenTelemetrySink` available under `[otel]` extra — emits each `TelemetryEvent` as a flat OTel `Event` on the current span (span nesting deferred until the recorder tracks correlation IDs) |
+| `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator. `OpenTelemetrySink` available under `[otel]` extra — synthesizes one OTel span per `TelemetryEvent` (span name = `event.kind`, attributes lifted from the event payload), with trace continuity via the recorder's `trace_id` / `span_id` correlation IDs |
 | `harness.memory`   | `SessionRecord`, `MemoryStore` protocol, `InMemoryStore` / `FileStore`, plus a `Session` helper that snapshots after every turn |
 | `harness.sandbox`  | `PathScope` + `PathPolicy` for filesystem-scoped tool calls, `safe_subprocess_run` with scrubbed env and timeout |
 | `harness.replay`   | `ReplayRunner` for deterministic playback, `run_eval`, `compare_sessions` (ignores tool-call IDs), `counterfactual` mutation + continuation, `diff_eval` cross-provider matrix |
@@ -36,8 +36,8 @@ The "harness" is everything around the model: prompt assembly, tool wiring, perm
 | `harness.fuzz`     | Hypothesis-driven fuzzing (extra `[fuzz]`); `fuzz_tool` (drives Pydantic-typed inputs through `Dispatcher.dispatch`), `fuzz_agent` (drives them through a full `Orchestrator` turn), `harness_property` pytest decorator; lazy imports — module loads without the extra |
 | `harness.attribute`| Causal provenance via leave-one-out ablation; `attribute(session, target, runner, agent, granularity, similarity)` ranks input chunks by influence on a target output. `JaccardSimilarity` / `LengthRatio` zero-dep, `EmbeddingSimilarity` opt-in (extra `[attribute]`) |
 | `harness.cache`    | Prompt-prefix-drift watcher; `PrefixWatcher` satisfies the runner's structural `prefix_watcher=` protocol, fingerprints each cache breakpoint per request, `audit(store, window_hours)` surfaces silent invalidators with `unified_diff`; ships `harness cache-audit` CLI subcommand |
-| `harness.debug`    | `pdb`-flavored debugger for orchestrator runs; `DebugRunner(real_runner, ...)` wraps any runner, pauses on a configurable predicate, exposes a `DebugContext` for inspect / mutate / fire / resume / abort, programmatic and interactive REPL modes; ships `harness debug` CLI subcommand for offline replay debugging |
-| `harness.speculate`| Pre-execute likely tool calls in `asyncio` tasks while the model generates; `Speculator` satisfies the runner's structural `speculator=` protocol, hits skip the runner's `PreToolUse` / dispatch / `PostToolUse` cycle. Ships `LastCallPredictor`, `SequencePredictor` (bigram), and `CrossSessionPredictor` (loads the K most-recent SessionRecords from a `MemoryStore`, runs bigram logic across the union with sentinel boundaries between sessions); plug a custom `Predictor` as needed. Wired into both `AnthropicRunner` and `OpenAICompatRunner`. Idempotency is a tool-author promise: speculator only fires for `Tool.idempotent=True` |
+| `harness.debug`    | `pdb`-flavored debugger for orchestrator runs; `DebugRunner(real_runner, ...)` wraps any runner, pauses on a configurable predicate, exposes a `DebugContext` for inspect / mutate / fire / resume / abort. Three modes: programmatic (callback), interactive REPL (`harness debug`), and **DAP server over stdio** (`harness debug --dap`) so VS Code / neovim-dap / Emacs dap-mode drive the same replay-driven session |
+| `harness.speculate`| Pre-execute likely tool calls in `asyncio` tasks while the model generates; `Speculator` satisfies the runner's structural `speculator=` protocol, hits skip the runner's `PreToolUse` / dispatch / `PostToolUse` cycle. Per-event lifecycle (`begin` / `observe` / `cancel_unobserved` / `try_resolve` / `end`): event-aware runners (`AnthropicRunner`) surface each `tool_use` block as it arrives in the stream so unmatched speculations get cancelled at stream-end, before dispatch begins. Ships `LastCallPredictor`, `SequencePredictor` (bigram), and `CrossSessionPredictor` (loads the K most-recent SessionRecords from a `MemoryStore`, runs bigram logic across the union with sentinel boundaries between sessions); plug a custom `Predictor` as needed. Wired into both `AnthropicRunner` and `OpenAICompatRunner`. Idempotency is a tool-author promise: speculator only fires for `Tool.idempotent=True` |
 
 ### CLI
 
@@ -45,7 +45,20 @@ The "harness" is everything around the model: prompt assembly, tool wiring, perm
 
 ## Install
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11+.
+
+```bash
+pip install harness-engineering-toolkit
+# or
+uv add harness-engineering-toolkit
+```
+
+The distribution name on PyPI is `harness-engineering-toolkit`
+(the shorter `harness-engineering` is held by an unrelated package).
+The importable module is `harness`, so user code is unaffected:
+`from harness import Orchestrator, Tool, …`.
+
+For local development, clone the repo and:
 
 ```bash
 uv sync --extra dev
@@ -117,21 +130,24 @@ uv run mypy          # type-check (strict)
 
 ## Roadmap
 
+The full per-wave decision log lives in
+[`progress.md`](progress.md); the forward plan from where the
+codebase is today is in [`docs/plan.md`](docs/plan.md). All ten
+standout features from the original design plus the four post-1.0
+follow-up waves (CI/CD, observability, modality, streaming) are
+shipped; see the [docs site](docs/) for the per-module API reference.
+
 Currently deferred (PRs welcome):
 
-- **Speculative tool execution** — predict the next likely tool call from
-  recent trajectory and pre-execute it while the model is still generating;
-  cancel on miss, return the cached result on hit. Needs a runner streaming
-  refactor (the runner kwargs `speculator` are already wired, structurally
-  typed `object | None`).
-- **OpenTelemetry export** — `harness.telemetry`'s `Sink` protocol is generic
-  enough that the OTel adapter is mechanical; not built yet.
-- **Plan inference from past sessions** — `harness.plan.derive_plan` asks a
-  live planner; mining plans from successful trajectories is future work.
-- **ML-based privacy detection** — Microsoft Presidio / AWS Comprehend
-  adapters under the existing `Detector` protocol; v1 is regex + entropy.
-- **DAP / IDE-protocol integration for `harness.debug`** — the REPL is
-  in-process today; an editor-driven debugger is a separate effort.
+- **Vendor cassette tests** — recorded Anthropic / OpenAI sessions
+  replayed in CI to catch SDK shape drift. Needs a one-time recording
+  step against the real APIs, gated on credentials.
+- **Anthropic Files API upload helper** — `harness.prompts.attach_file(file_id=...)`
+  works today; the convenience `upload_file(client, path) -> file_id`
+  helper is deferred for the same credential reason.
+- **`OpenAICompatRunner.run_stream()`** — `AnthropicRunner.run_stream()`
+  ships; OpenAI's chat-completions streaming has a different
+  delta-by-delta shape and is queued for a follow-up.
 
 ## License
 

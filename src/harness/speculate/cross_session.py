@@ -8,9 +8,12 @@ in the current `history`.
 
 Design notes (pinned from the spec / advisor review):
 
-* **K most-recent records** (default 5), not all records. The Protocol does
-  not promise a sort order, so we sort by ``record.updated_at`` descending
-  ourselves and slice to ``[:K]``.
+* **K most-recent records** (default 5), not all records. The
+  :class:`harness.memory.store.MemoryStore` ``list`` Protocol contract
+  requires records be returned ordered by ``updated_at`` descending, so the
+  ``[:K]`` slice we receive from ``store.list(limit=K)`` is already the
+  K-most-recent set. We still re-sort defensively to remain correct against
+  any future non-conformant third-party store.
 * **Sentinel between sessions.** Concatenating tool sequences across sessions
   would create spurious bigrams of the form ``(last-call-of-A,
   first-call-of-B)``. We insert a sentinel ``Message`` between records so the
@@ -89,7 +92,8 @@ class CrossSessionPredictor:
     @classmethod
     async def from_store(cls, store: MemoryStore, *, K: int = 5) -> CrossSessionPredictor:
         records = await store.list(limit=K)
-        # Defensive sort: the Protocol doesn't guarantee recency order.
+        # Defensive sort: MemoryStore.list contracts recency order, but we
+        # re-sort to remain correct against any future non-conformant store.
         records.sort(key=lambda r: r.updated_at, reverse=True)
         # Reverse to chronological order so the most-recent record's tool
         # sequence sits closest to the current history in the bigram walk.

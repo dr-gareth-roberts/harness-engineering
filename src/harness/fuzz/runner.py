@@ -23,6 +23,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel
+
 from harness.fuzz.strategies import _require_hypothesis, pydantic_strategy
 from harness.prompts.messages import Message, text
 from harness.tools.schema import ToolCall, ToolResult
@@ -72,11 +74,11 @@ class FuzzReport:
 
 
 def _generate_examples(
-    model_cls: Any,
+    model_cls: type[BaseModel],
     n: int,
     seed: int,
     overrides: dict[str, Any] | None,
-) -> list[Any]:
+) -> list[BaseModel]:
     """Generate ``n`` validated Pydantic instances deterministically.
 
     Hypothesis is sync; we run a small ``@given`` collector to build the
@@ -89,7 +91,7 @@ def _generate_examples(
     from hypothesis import seed as hyp_seed
 
     strategy = pydantic_strategy(model_cls, overrides=overrides)
-    collected: list[Any] = []
+    collected: list[BaseModel] = []
 
     @hyp_seed(seed)
     @settings(
@@ -101,7 +103,7 @@ def _generate_examples(
         suppress_health_check=list(HealthCheck),
     )
     @given(value=strategy)
-    def _collect(value: Any) -> None:
+    def _collect(value: BaseModel) -> None:
         collected.append(value)
 
     _collect()
@@ -128,7 +130,7 @@ async def fuzz_tool(
     * produced a ``ToolResult`` with ``is_error=True``.
     """
 
-    tool = dispatcher._tools.get(tool_name)
+    tool = dispatcher.tools.get(tool_name)
     if tool is None:
         raise KeyError(f"tool {tool_name!r} is not registered on the dispatcher")
 
@@ -170,7 +172,7 @@ async def fuzz_agent(
     ``model_dump`` dict, which keeps tests self-contained.
     """
 
-    tool = orchestrator.dispatcher._tools.get(tool_name)
+    tool = orchestrator.dispatcher.tools.get(tool_name)
     if tool is None:
         raise KeyError(f"tool {tool_name!r} is not registered on the dispatcher")
 

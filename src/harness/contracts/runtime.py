@@ -112,8 +112,9 @@ def attach_contracts(
 
     hooks.register(SessionStart, on_session_start)
 
-    # PromptSubmit: feed user text into every DFA. None of the patterns can
-    # block at this stage (it's pre-tool-use), but warn / require still update.
+    # PromptSubmit: feed user text into every DFA. A `forbid` match on user
+    # text yields a block decision; `warn` and `require` actions surface as
+    # warnings/raises per _react_to_violation.
     async def on_prompt_submit(event: PromptSubmit) -> HookDecision | None:
         message = _msg_from_prompt_submit(event)
         for dfa in dfas:

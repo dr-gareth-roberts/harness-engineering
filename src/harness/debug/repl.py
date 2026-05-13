@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import sys
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 from harness.prompts.messages import Message, text
 
@@ -170,13 +170,8 @@ class DebugRepl:
             self._print("usage: inspect <python-expr>")
             return
         expr = " ".join(rest)
-        # The whole point of an interactive debugger REPL is to let the
-        # operator evaluate arbitrary expressions against the paused state;
-        # restricting this would defeat the feature. The REPL never runs
-        # in production paths — it only fires when a breakpoint hits in
-        # interactive mode, which is opt-in.
         try:
-            value = eval(expr, {"ctx": self._ctx})  # noqa: S307 - REPL by design
+            value = evaluate_in_context(expr, self._ctx)
         except Exception as exc:  # noqa: BLE001 - surface anything to the user
             self._print(f"[harness-debug] inspect error: {exc}")
             return
@@ -187,6 +182,23 @@ class DebugRepl:
     def _print(self, line: str) -> None:
         self._stdout.write(line + "\n")
         self._stdout.flush()
+
+
+def evaluate_in_context(expression: str, ctx: DebugContext) -> Any:
+    """Evaluate `expression` against a paused `DebugContext`.
+
+    The DAP adapter's `evaluate` request routes through here when
+    `allowEvaluate: true` is in the launch arguments (Wave 13b #17),
+    sharing the same code path as the REPL's `inspect` command. This
+    is the canonical "operator evaluates arbitrary Python against the
+    paused state" surface; both consumers (REPL, DAP) are opt-in.
+
+    Restricted call paths only — the function is never reached on a
+    production / non-debug path. The whole point of an interactive
+    debugger is letting the operator probe state with arbitrary
+    expressions; restricting this would defeat the feature.
+    """
+    return eval(expression, {"ctx": ctx})  # noqa: S307 - debugger by design
 
 
 def _summarize_message(msg: Message) -> str:

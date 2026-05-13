@@ -17,6 +17,12 @@ class HookRunner:
     returns the list of decisions collected so far (including the blocker as the last
     element). The runner does not enforce policy — callers inspect the decisions and
     decide what to do.
+
+    Exception discipline: a handler that raises propagates the exception up through
+    `emit` and aborts the turn. This is intentionally asymmetric with the
+    `Dispatcher`, which converts handler exceptions to `ToolResult(is_error=True)`.
+    See `docs/contracts/user-code-execution.md` for how exceptions from hook
+    handlers vs tool handlers vs sink emit are handled.
     """
 
     def __init__(self) -> None:

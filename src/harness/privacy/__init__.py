@@ -22,6 +22,7 @@ from harness.privacy.detectors import (
 )
 from harness.privacy.events import DetectionEvent
 from harness.privacy.packs import HIPAA_PACK, PII_PACK, SECRET_PACK
+from harness.privacy.presidio import PresidioDetector, build_pii_pack
 
 __all__ = [
     "HIPAA_PACK",
@@ -35,7 +36,9 @@ __all__ = [
     "DetectorDirection",
     "Direction",
     "EntropyDetector",
+    "PresidioDetector",
     "PrivacyBoundary",
     "PrivacyViolation",
     "RegexDetector",
+    "build_pii_pack",
 ]

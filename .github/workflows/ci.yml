@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-flight runs on the same ref when a new push lands —
+# saves CI minutes on rapid iteration.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Matrix wrapper around the reusable gate workflow. The gate body
+  # (sync, ruff, mypy, pytest, codeblocks, mkdocs, uv build) and the
+  # base-install smoke live in `_gate.yml` — both `ci.yml` and
+  # `release.yml` call it via `uses:` so there's one place to add a
+  # gate step and both pipelines pick it up.
+  gate:
+    name: gate (py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    uses: ./.github/workflows/_gate.yml
+    with:
+      python-version: ${{ matrix.python }}

@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, Any
 
 from harness.telemetry.events import OrchestratorTurn, TelemetryEvent, ToolDispatched
-from harness.telemetry.recorder import Telemetry
+from harness.telemetry.recorder import Redactor, Telemetry
 from harness.telemetry.sinks import JSONLSink, MemorySink, MultiSink, NullSink, Sink
 
 if TYPE_CHECKING:
@@ -14,6 +14,7 @@ __all__ = [
     "NullSink",
     "OpenTelemetrySink",
     "OrchestratorTurn",
+    "Redactor",
     "Sink",
     "Telemetry",
     "TelemetryEvent",

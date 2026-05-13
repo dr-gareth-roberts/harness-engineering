@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
+import shutil
+import signal
 import sys
 import time
 from pathlib import Path
@@ -119,3 +123,54 @@ async def test_explicit_env_does_not_default_scrub() -> None:
         env={"PATH": os.environ.get("PATH", ""), "X": "yes"},
     )
     assert result.stdout.strip() == "yes"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="start_new_session / killpg are POSIX-only; see process.py docstring.",
+)
+async def test_timeout_kills_double_forked_grandchildren(tmp_path: Path) -> None:
+    """A misbehaving program that backgrounds a sleeper must not survive timeout.
+
+    The shell launches a long sleeper in the background (`&`), records its
+    PID, then sleeps itself. On timeout the direct child gets killed, but
+    without `start_new_session=True` + `killpg`, the backgrounded sleeper
+    inherits PID 1 / the test process and lingers. This test asserts that
+    after the timeout the grandchild PID is gone.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available on this platform")
+
+    pidfile = tmp_path / "grandchild.pid"
+    # Background a long sleeper, write its PID, then block. The direct child
+    # (bash) will be killed on timeout; without process-group cleanup the
+    # backgrounded `sleep 30` survives.
+    script = f"sleep 30 & echo $! > {pidfile}; sleep 30"
+
+    with pytest.raises(SubprocessTimeout):
+        await safe_subprocess_run([bash, "-c", script], timeout=0.5)
+
+    # Give the kernel a moment to deliver SIGKILL across the group.
+    await asyncio.sleep(0.3)
+
+    assert pidfile.exists(), "shell did not record the grandchild PID"
+    grandchild_pid = int(pidfile.read_text().strip())
+
+    try:
+        # `kill 0` probes existence without delivering a signal.
+        # ProcessLookupError ⇒ dead (what we want).
+        os.kill(grandchild_pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+
+    if alive:
+        # The fix regressed — clean up the orphan we just leaked so this test
+        # process tree doesn't carry it for ~30s, then fail loudly.
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(grandchild_pid, signal.SIGKILL)
+        pytest.fail(
+            f"grandchild PID {grandchild_pid} survived timeout — "
+            "start_new_session/killpg cleanup did not reach the process group."
+        )

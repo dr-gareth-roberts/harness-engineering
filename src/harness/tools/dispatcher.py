@@ -14,6 +14,19 @@ if TYPE_CHECKING:
 
 
 class Dispatcher:
+    """Routes `ToolCall`s to their registered handlers and produces `ToolResult`s.
+
+    Validation errors (from the tool's input model) and handler exceptions are both
+    converted to `ToolResult(is_error=True, content=str(exc))` — the model sees the
+    error in its tool-result block and can self-correct. The dispatcher never raises
+    from a handler bug.
+
+    Exception discipline: this conversion contract is intentionally asymmetric with
+    `HookRunner.emit`, which propagates handler exceptions instead. See
+    `docs/contracts/user-code-execution.md` for how exceptions from hook handlers
+    vs tool handlers vs sink emit are handled.
+    """
+
     def __init__(
         self,
         tools: Iterable[Tool] = (),
@@ -45,11 +58,20 @@ class Dispatcher:
         return dict(self._tools)
 
     async def dispatch(self, call: ToolCall) -> ToolResult:
-        start = time.perf_counter()
-        result = await self._dispatch_inner(call)
-        duration_ms = (time.perf_counter() - start) * 1000.0
+        # Open a span_scope for the dispatch so the emitted
+        # `ToolDispatched` event correlates back to the orchestrator
+        # turn that produced this call. The scope is conditional on
+        # telemetry being configured — without it, no `span_id` would
+        # ever propagate, so the scope is wasted work.
+        if self._telemetry is None:
+            start = time.perf_counter()
+            return await self._dispatch_inner(call)
 
-        if self._telemetry is not None:
+        async with self._telemetry.span_scope():
+            start = time.perf_counter()
+            result = await self._dispatch_inner(call)
+            duration_ms = (time.perf_counter() - start) * 1000.0
+
             from harness.telemetry.events import ToolDispatched, jsonify
 
             await self._telemetry.emit(
@@ -61,7 +83,7 @@ class Dispatcher:
                     duration_ms=duration_ms,
                 )
             )
-        return result
+            return result
 
     async def _dispatch_inner(self, call: ToolCall) -> ToolResult:
         tool = self._tools.get(call.name)
