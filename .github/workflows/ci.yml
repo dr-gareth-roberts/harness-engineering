@@ -16,90 +16,18 @@ concurrency:
 permissions:
   contents: read
 
-# Tell `uv run` not to auto-sync. Without this, recent uv versions
-# (~0.5) re-derive the project's default dependency set on every
-# `uv run` invocation and remove anything the previous `uv sync
-# --extra ...` step installed — so `ruff`, `mypy`, `pytest`, and
-# `mkdocs` all vanish between steps. With `UV_NO_SYNC=1`, the
-# explicit `uv sync --extra ...` step is the single source of truth
-# for what's in the venv, and `uv run` only resolves the executable.
-#
-# `UV_PYTHON` is set per-step in the matrix; without it, `uv run`
-# falls back to the project's `.python-version` (3.11) instead of
-# the matrix's Python, which would force a venv recreate on every
-# `uv run` invocation and re-introduce the same drop-the-extras bug.
-env:
-  UV_NO_SYNC: "1"
-
 jobs:
+  # Matrix wrapper around the reusable gate workflow. The gate body
+  # (sync, ruff, mypy, pytest, codeblocks, mkdocs, uv build) and the
+  # base-install smoke live in `_gate.yml` — both `ci.yml` and
+  # `release.yml` call it via `uses:` so there's one place to add a
+  # gate step and both pipelines pick it up.
   gate:
     name: gate (py${{ matrix.python }})
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13"]
-    env:
-      # Without this, `uv run` falls back to `.python-version` (3.11)
-      # and recreates the venv on the 3.12 / 3.13 matrix slots — which
-      # also clears the extras that `uv sync` just installed.
-      UV_PYTHON: ${{ matrix.python }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          # Pin the uv version so a uv release doesn't silently change
-          # CI behavior. Bump deliberately when needed.
-          version: "0.5.x"
-          enable-cache: true
-
-      - name: Set up Python ${{ matrix.python }}
-        run: uv python install ${{ matrix.python }}
-
-      - name: Sync dependencies
-        # All extras the gate needs to validate. We don't include `attribute`
-        # in CI because sentence-transformers pulls torch (~1GB), and the
-        # module's lazy-import contract is verified by the dual-state mypy
-        # test rather than by running CI with it installed.
-        run: |
-          uv sync \
-            --python ${{ matrix.python }} \
-            --extra dev \
-            --extra anthropic \
-            --extra openai-compat \
-            --extra otel \
-            --extra fuzz \
-            --extra docs
-
-      - name: ruff check
-        run: uv run ruff check src tests examples
-
-      - name: ruff format check
-        run: uv run ruff format --check src tests examples
-
-      - name: mypy strict (src + tests)
-        run: uv run mypy --strict src tests
-
-      - name: pytest
-        # `--cov` enables coverage collection (configured in pyproject.toml).
-        # The `fail_under = 85` threshold there gates on a drop.
-        run: uv run pytest -q --cov=harness
-
-      - name: pytest --codeblocks (docs gate)
-        # Extracts and runs the runnable Python blocks in the showcase
-        # docs pages. Non-runnable blocks (bash, illustrative sketches,
-        # snippets referencing undefined names) carry an explicit
-        # `<!--pytest.mark.skip-->` comment immediately above them.
-        # Catches doc/source API drift before readers do.
-        run: uv run pytest --codeblocks docs/quickstart.md docs/index.md
-
-      - name: mkdocs build (strict)
-        run: uv run mkdocs build --strict
-
-      - name: uv build
-        # Verifies wheel + sdist build cleanly with the current source tree.
-        # Catches packaging-level breakage that tests would miss (e.g.,
-        # missing files in the wheel because hatchling didn't pick them up).
-        run: uv build
+    uses: ./.github/workflows/_gate.yml
+    with:
+      python-version: ${{ matrix.python }}

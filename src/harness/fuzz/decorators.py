@@ -29,12 +29,31 @@ def harness_property(
     n: int = 100,
     seed: int = 0,
 ) -> Callable[[PayloadFn], Callable[[], Awaitable[None]]]:
-    """Wrap an async test as a Hypothesis-driven property over a tool.
+    """Deterministic input enumeration over a Hypothesis strategy.
+
+    **This is NOT a Hypothesis property test.** Despite the name, the
+    decorator runs ``Phase.generate`` only — it **does not shrink failing
+    examples** (no ``Phase.shrink``) and **reports the first failure
+    directly** by propagating the raised exception. There is no
+    Hypothesis-style ``Falsifying example: ...`` summary, no shrunk
+    minimal counterexample, and no on-disk reproducer database.
+
+    For property-based testing with shrinking, use Hypothesis's
+    ``@given`` directly.
+
+    What the decorator does provide:
+
+    * Validated Pydantic payloads drawn from the tool's ``input_model``
+      via :func:`harness.fuzz.strategies.pydantic_strategy`.
+    * Deterministic enumeration: same ``seed`` → same payload sequence
+      → same first failing payload.
+    * Graceful degradation: if the ``[fuzz]`` extra is not installed,
+      the wrapped test ``pytest.skip``\\ s rather than erroring at import.
 
     The wrapped function receives one validated payload (a Pydantic
     instance for the tool's ``input_model``) per generated example and
     is expected to perform whatever assertions matter to the test. A
-    raised exception fails the run.
+    raised exception fails the run on the first failing payload.
 
     Usage::
 
@@ -61,7 +80,9 @@ def harness_property(
 
             from harness.fuzz.runner import _generate_examples
 
-            tool_obj = dispatcher._tools.get(tool)
+            # Deferred: opt-in Phase.shrink — see audit/RELEASE-TODO.md M1.21.
+            # Today this is a deterministic enumerator, not a shrinking property test.
+            tool_obj = dispatcher.tools.get(tool)
             if tool_obj is None:
                 raise KeyError(f"tool {tool!r} is not registered on the dispatcher")
 

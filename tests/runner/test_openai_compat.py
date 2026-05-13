@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import sys
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -10,7 +12,7 @@ from pydantic import BaseModel
 from harness.agents import SubAgent
 from harness.hooks import HookRunner, PostToolUse, PreToolUse
 from harness.policy import AllowList, attach_pre_tool_policies
-from harness.prompts import Message, text
+from harness.prompts import ContentBlock, Message, text
 from harness.runner.openai_compat import (
     OpenAICompatRunner,
     _serialize_tool_content,
@@ -646,3 +648,294 @@ async def test_oa_runner_with_speculator_none_does_not_observe() -> None:
 
     assert dispatch_log == ["hi"]
     assert isinstance(result, Message)
+
+
+# ---------------------------------------------------------------------------
+# M1.10 — empty-content assistant rows are filtered before the wire
+#
+# Some OpenAI-compatible servers (vLLM, llama.cpp) reject assistant
+# messages that carry neither text content nor tool_calls. The
+# translator must drop those rows; a strict-fake server here simulates
+# the rejection so a regression would fail loudly.
+
+
+class _StrictNoEmptyAssistantCompletions:
+    """Fake `chat.completions` that rejects empty-content assistant rows
+    with no tool_calls — mirrors vLLM / llama.cpp behavior."""
+
+    def __init__(self, responses: list[FakeOAResponse]) -> None:
+        self._responses = list(responses)
+        self.requests: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> FakeOAResponse:
+        messages = kwargs.get("messages") or []
+        assert isinstance(messages, list)
+        for m in messages:
+            assert isinstance(m, dict)
+            if m.get("role") != "assistant":
+                continue
+            content = m.get("content")
+            tool_calls = m.get("tool_calls")
+            content_is_empty = content in (None, "") or (isinstance(content, list) and not content)
+            if content_is_empty and not tool_calls:
+                raise RuntimeError(
+                    "fake backend rejected assistant message with empty content and no tool_calls"
+                )
+        if not self._responses:
+            raise RuntimeError("strict fake: no canned responses left")
+        self.requests.append(kwargs)
+        return self._responses.pop(0)
+
+
+class _StrictNoEmptyAssistantChat:
+    def __init__(self, responses: list[FakeOAResponse]) -> None:
+        self.completions = _StrictNoEmptyAssistantCompletions(responses)
+
+
+class _StrictNoEmptyAssistantClient:
+    def __init__(self, responses: list[FakeOAResponse]) -> None:
+        self.chat = _StrictNoEmptyAssistantChat(responses)
+
+
+def test_translate_in_drops_empty_assistant_with_no_tool_calls() -> None:
+    """Direct translator test: an assistant Message with no text and no
+    tool_use blocks must not appear in the output payload."""
+    msgs: list[Message] = [
+        text("user", "hello"),
+        Message(role="assistant", content=[]),  # entirely empty assistant
+        text("user", "follow-up"),
+    ]
+    out = _translate_in(msgs)
+    roles = [m["role"] for m in out]
+    assert roles == ["user", "user"]
+
+
+def test_translate_in_keeps_assistant_with_tool_calls_only() -> None:
+    """Empty text but with tool_use blocks is valid — keep the row so
+    the tool_call_id chain stays intact."""
+    msgs: list[Message] = [
+        text("user", "echo"),
+        Message(
+            role="assistant",
+            content=[
+                ContentBlock(
+                    type="tool_use",
+                    tool_use=ToolCall(name="echo", arguments={"text": "hi"}, id="tc_1"),
+                ),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ContentBlock(
+                    type="tool_result",
+                    tool_result=ToolResult(id="tc_1", content="hi"),
+                ),
+            ],
+        ),
+    ]
+    out = _translate_in(msgs)
+    assistant_rows = [m for m in out if m["role"] == "assistant"]
+    assert len(assistant_rows) == 1
+    assert assistant_rows[0]["content"] == ""
+    assert assistant_rows[0]["tool_calls"][0]["function"]["name"] == "echo"
+
+
+async def test_strict_backend_does_not_receive_empty_assistant_rows() -> None:
+    """Integration test against a server that rejects empty-content
+    assistants. The runner must not pass one through, even after a
+    tool loop."""
+    tool_use = FakeOAToolCall(
+        id="tc_1",
+        function=FakeOAFunction(name="echo", arguments=json.dumps({"text": "hi"})),
+    )
+    response_1 = FakeOAResponse(
+        choices=[
+            FakeOAChoice(
+                message=FakeOAMessage(content=None, tool_calls=[tool_use]),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    response_2 = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="echoed: hi"), finish_reason="stop")]
+    )
+    client = _StrictNoEmptyAssistantClient(responses=[response_1, response_2])
+    dispatcher, log = _echo_dispatcher()
+    runner = OpenAICompatRunner(dispatcher, HookRunner(), client=client)  # type: ignore[arg-type]
+
+    # If the empty-row filter ever regresses, the strict fake will raise
+    # on the second iteration (where the assistant tool_calls row is
+    # appended) or on a prior assistant-only round trip.
+    result = await runner(_agent(), [text("user", "echo hi")])
+    assert log == ["hi"]
+    assert result.content[0].text == "echoed: hi"
+
+
+async def test_strict_backend_rejects_when_assistant_message_is_replayed_with_no_text() -> None:
+    """Pass a prior assistant Message with no text and no tool_use as
+    part of the input. With the filter, the strict backend accepts the
+    payload; without it, the backend would raise."""
+    msgs: list[Message] = [
+        text("user", "hi"),
+        Message(role="assistant", content=[]),  # would be rejected pre-fix
+        text("user", "go on"),
+    ]
+    response = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="ok"), finish_reason="stop")]
+    )
+    client = _StrictNoEmptyAssistantClient(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+    runner = OpenAICompatRunner(dispatcher, HookRunner(), client=client)  # type: ignore[arg-type]
+
+    result = await runner(_agent(), msgs)
+    assert result.content[0].text == "ok"
+    # And confirm the request that did land has no empty-content assistant.
+    sent = cast(list[dict[str, Any]], client.chat.completions.requests[0]["messages"])
+    for m in sent:
+        if m["role"] == "assistant":
+            assert m["content"] or m.get("tool_calls")
+
+
+# ---------------------------------------------------------------------------
+# M1.24 — malformed tool-call JSON surfaces as an is_error ToolResult
+#
+# Previously the runner silently called the tool with empty args. Now
+# the parse failure becomes a visible trajectory entry and emits a
+# WARNING log.
+
+
+async def test_malformed_tool_call_json_synthesizes_error_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tool_call with non-JSON arguments must NOT reach dispatch.
+    Instead the runner returns a ToolResult(is_error=True, ...) and
+    emits a WARNING."""
+    bad_tool_call = FakeOAToolCall(
+        id="tc_bad",
+        function=FakeOAFunction(name="echo", arguments="{not valid json"),
+    )
+    response_1 = FakeOAResponse(
+        choices=[
+            FakeOAChoice(
+                message=FakeOAMessage(content=None, tool_calls=[bad_tool_call]),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    response_2 = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="recovered"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response_1, response_2])
+    dispatcher, dispatch_log = _echo_dispatcher()
+
+    pre_calls: list[ToolCall] = []
+    post_calls: list[tuple[ToolCall, ToolResult]] = []
+    hooks = HookRunner()
+    hooks.register(PreToolUse, lambda e: pre_calls.append(e.call))
+    hooks.register(PostToolUse, lambda e: post_calls.append((e.call, e.result)))
+
+    runner = OpenAICompatRunner(dispatcher, hooks, client=client)  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.WARNING, logger="harness.runner.openai_compat"):
+        result = await runner(_agent(), [text("user", "do it")])
+
+    # Tool was NOT dispatched, and PreToolUse / PostToolUse hooks did
+    # not fire — the parse-failure path is its own short circuit.
+    assert dispatch_log == []
+    assert pre_calls == []
+    assert post_calls == []
+
+    # The error ToolResult must reach the model on the next iteration.
+    second_request_messages = client.chat.completions.requests[1]["messages"]
+    tool_msg = next(m for m in second_request_messages if m.get("role") == "tool")
+    assert tool_msg["tool_call_id"] == "tc_bad"
+    assert "malformed tool-call JSON" in tool_msg["content"]
+
+    # The final assistant response is unaffected (the model "recovered").
+    assert result.content[0].text == "recovered"
+
+    # A WARNING log entry was emitted naming the tool and id.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("malformed tool-call JSON" in r.getMessage() for r in warnings)
+    assert any("tc_bad" in r.getMessage() for r in warnings)
+
+
+async def test_malformed_tool_call_json_does_not_fire_speculator_try_resolve() -> None:
+    """The dispatch short-circuit also skips the speculator hit-check —
+    the failure is a runner-level concern, not a prediction one."""
+    bad_tool_call = FakeOAToolCall(
+        id="tc_bad",
+        function=FakeOAFunction(name="echo", arguments="{broken"),
+    )
+    response_1 = FakeOAResponse(
+        choices=[
+            FakeOAChoice(
+                message=FakeOAMessage(content=None, tool_calls=[bad_tool_call]),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    response_2 = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="done"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response_1, response_2])
+    dispatcher, _ = _echo_dispatcher()
+    spec = _StubSpeculator()
+
+    runner = OpenAICompatRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        speculator=spec,
+    )
+    await runner(_agent(), [text("user", "go")])
+
+    # observe still fires (it has its own try/except and parses
+    # independently), but try_resolve does NOT — dispatch was bypassed.
+    assert spec.try_resolve_calls == []
+
+
+# ---------------------------------------------------------------------------
+# M1.25 — caller-supplied system message is not duplicated
+
+
+async def test_caller_system_message_skips_agent_system_prepend() -> None:
+    """If the caller already passes a system message, the runner must
+    not prepend `agent.system_prompt` on top of it."""
+    response = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="ok"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+    runner = OpenAICompatRunner(dispatcher, HookRunner(), client=client)  # type: ignore[arg-type]
+
+    caller_system = "Only follow the caller's instructions."
+    await runner(
+        _agent(),
+        [text("system", caller_system), text("user", "hi")],
+    )
+
+    sent = client.chat.completions.requests[0]["messages"]
+    system_rows = [m for m in sent if m["role"] == "system"]
+    assert len(system_rows) == 1
+    assert system_rows[0]["content"] == caller_system
+    # The default agent system prompt must NOT appear anywhere.
+    assert not any("small test agent" in (m.get("content") or "") for m in sent)
+
+
+async def test_agent_system_prompt_still_used_when_caller_has_none() -> None:
+    """Sanity check: the absence-of-caller-system path is unchanged —
+    the agent's prompt is still prepended."""
+    response = FakeOAResponse(
+        choices=[FakeOAChoice(message=FakeOAMessage(content="ok"), finish_reason="stop")]
+    )
+    client = FakeAsyncOpenAI(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+    runner = OpenAICompatRunner(dispatcher, HookRunner(), client=client)  # type: ignore[arg-type]
+
+    await runner(_agent(), [text("user", "hi")])
+    sent = client.chat.completions.requests[0]["messages"]
+    system_rows = [m for m in sent if m["role"] == "system"]
+    assert len(system_rows) == 1
+    assert "small test agent" in system_rows[0]["content"]

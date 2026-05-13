@@ -14,6 +14,19 @@ if TYPE_CHECKING:
 
 
 class Dispatcher:
+    """Routes `ToolCall`s to their registered handlers and produces `ToolResult`s.
+
+    Validation errors (from the tool's input model) and handler exceptions are both
+    converted to `ToolResult(is_error=True, content=str(exc))` — the model sees the
+    error in its tool-result block and can self-correct. The dispatcher never raises
+    from a handler bug.
+
+    Exception discipline: this conversion contract is intentionally asymmetric with
+    `HookRunner.emit`, which propagates handler exceptions instead. See
+    `docs/contracts/user-code-execution.md` for how exceptions from hook handlers
+    vs tool handlers vs sink emit are handled.
+    """
+
     def __init__(
         self,
         tools: Iterable[Tool] = (),

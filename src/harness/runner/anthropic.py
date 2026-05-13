@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from typing import Any, Literal
 
 try:
@@ -56,6 +58,8 @@ from harness.streaming import (
 )
 from harness.tools.dispatcher import Dispatcher
 from harness.tools.schema import ToolCall, ToolResult
+
+logger = logging.getLogger(__name__)
 
 ThinkingMode = Literal["adaptive", "disabled"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -227,7 +231,14 @@ class AnthropicRunner:
     ) -> None:
         self.dispatcher = dispatcher
         self.hooks = hooks
-        self._client = client if client is not None else AsyncAnthropic()
+        # Lazy client construction (M1.26): the Anthropic SDK reads
+        # `ANTHROPIC_API_KEY` from the environment in `AsyncAnthropic()`
+        # and raises if missing. Deferring construction to first use lets
+        # callers instantiate `AnthropicRunner` without an API key
+        # configured — handy for test scaffolding and for processes that
+        # only conditionally call the runner. Tests inject a
+        # pre-constructed `client=` to bypass the SDK entirely.
+        self._client: AsyncAnthropic | None = client
         self._max_tokens = max_tokens
         self._thinking_mode: ThinkingMode = thinking_mode
         self._effort: Effort | None = effort
@@ -243,6 +254,19 @@ class AnthropicRunner:
         # streaming + speculator state make a clean retry semantic
         # non-trivial; see docs/plan.md).
         self._timeout_s = timeout_s
+
+    @property
+    def client(self) -> AsyncAnthropic:
+        """Return the SDK client, constructing on first access.
+
+        Constructing `AsyncAnthropic()` reads `ANTHROPIC_API_KEY` from
+        the environment and raises if missing — so deferring to first
+        access means a missing key surfaces at the first runner call,
+        not at `__init__`. The instance is cached for subsequent calls.
+        """
+        if self._client is None:
+            self._client = AsyncAnthropic()
+        return self._client
 
     def _build_request(
         self,
@@ -274,6 +298,67 @@ class AnthropicRunner:
         return kwargs
 
     async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
+        """Drive the tool-use loop and return the terminal assistant `Message`.
+
+        Consumes the shared `_iterate_tool_loop` generator and returns the
+        message carried on the terminal `MessageEnd`. `contextlib.aclosing`
+        guarantees the generator's `finally` clause (which fires
+        `Speculator.end`) runs before we return — without it, the generator
+        would remain suspended at the `yield MessageEnd(...)` and the
+        speculator cleanup would only happen at GC time, breaking the
+        per-iteration `begin`/`end` contract.
+        """
+        async with aclosing(self._iterate_tool_loop(agent, messages)) as events:
+            async for event in events:
+                if isinstance(event, MessageEnd):
+                    return event.message
+        # `_iterate_tool_loop` raises `RuntimeError` when `max_iterations`
+        # is exhausted before any terminal stop reason, so this branch is
+        # only reachable if the generator returns without yielding
+        # `MessageEnd` — which would be a programming error in the loop.
+        raise RuntimeError("AnthropicRunner._iterate_tool_loop exited without yielding MessageEnd.")
+
+    async def run_stream(
+        self,
+        agent: SubAgent,
+        messages: list[Message],
+    ) -> AsyncIterator[StreamEvent]:
+        """Run the same tool-use loop as `__call__` but yield streaming
+        events as the model generates.
+
+        Yield order, per iteration:
+        - `TextDelta(text=...)` — once per SDK `text` delta event.
+        - `ToolUseStart(call=...)` — once per `content_block_stop` for
+          a tool_use block, *after* speculator.observe but *before*
+          the runner's hook + dispatch cycle.
+        - `ToolUseEnd(call=..., result=...)` — once per dispatched
+          tool call, after the result is finalized.
+
+        At the very end (`end_turn` / `stop_sequence` / `pause_turn` /
+        `refusal`), yields exactly one `MessageEnd(message=...)` and
+        returns. `MessageEnd.message` matches what `__call__` would
+        have returned.
+        """
+        async for event in self._iterate_tool_loop(agent, messages):
+            yield event
+
+    async def _iterate_tool_loop(
+        self,
+        agent: SubAgent,
+        messages: list[Message],
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Shared tool-use-loop state machine driving both surfaces.
+
+        Yields the public `StreamEvent` types as the loop progresses. The
+        terminal yield is always exactly one `MessageEnd(message=...)`
+        before normal return; consumers that only need the final message
+        (`__call__`) collect that one event, consumers that want the
+        streaming play-by-play (`run_stream`) forward everything.
+
+        The shape mirrors the previous `run_stream` body almost
+        verbatim — the win is dedup, not redesign. Behavior contract
+        pinned by `tests/runner/test_anthropic_pin_parity.py`.
+        """
         api_messages, system = _translate_in(messages)
         request = self._build_request(agent, api_messages, system)
 
@@ -310,29 +395,35 @@ class AnthropicRunner:
 
             try:
                 async with self._stream_with_timeout(request) as stream:
-                    # Iterate the stream's high-level events as they
-                    # arrive. The only one we react to is
-                    # `content_block_stop` for `tool_use` blocks —
-                    # surface them to the speculator so it can mark
-                    # matching pending speculations as observed before
-                    # the model finishes generating. After the loop,
-                    # `get_final_message` returns the accumulated
-                    # message; the SDK's `until_done()` is a no-op once
-                    # the stream is consumed, mirrored by the test fake.
                     async for event in stream:
-                        if self._speculator is None:
+                        # Text deltas: yield as TextDelta.
+                        event_type = getattr(event, "type", None)
+                        if event_type == "text":
+                            text_value = getattr(event, "text", None)
+                            if text_value:
+                                yield TextDelta(text=text_value)
                             continue
-                        if getattr(event, "type", None) != "content_block_stop":
-                            continue
-                        block = getattr(event, "content_block", None)
-                        if block is None or getattr(block, "type", None) != "tool_use":
-                            continue
-                        call = ToolCall(
-                            name=block.name,
-                            arguments=dict(block.input),
-                            id=block.id,
-                        )
-                        await self._speculator.observe(call)
+
+                        # tool_use block done: surface to speculator so it
+                        # can mark matching pending speculations as
+                        # observed BEFORE the runner dispatches, then
+                        # yield `ToolUseStart` so streaming consumers can
+                        # react before dispatch. The dispatch itself
+                        # happens after `get_final_message` returns.
+                        if (
+                            event_type == "content_block_stop"
+                            and getattr(getattr(event, "content_block", None), "type", None)
+                            == "tool_use"
+                        ):
+                            block = event.content_block
+                            call = ToolCall(
+                                name=block.name,
+                                arguments=dict(block.input),
+                                id=block.id,
+                            )
+                            if self._speculator is not None:
+                                await self._speculator.observe(call)
+                            yield ToolUseStart(call=call)
                     response = await stream.get_final_message()
 
                 # Stream is now fully arrived. Cancel any pending
@@ -349,23 +440,27 @@ class AnthropicRunner:
                 running_history.append(assistant_message)
                 await self.hooks.emit(PostAssistantMessage(message=assistant_message))
 
+                # Terminal stop reasons: emit MessageEnd and return.
                 if response.stop_reason in ("end_turn", "stop_sequence"):
-                    return assistant_message
+                    yield MessageEnd(message=assistant_message)
+                    return
 
                 if response.stop_reason == "pause_turn":
                     # Server-side pause (typically a long-running tool
                     # exceeded the per-turn budget). Surface as an event
-                    # and return the partial assistant message; the caller
+                    # and emit the partial assistant message; the caller
                     # can re-invoke with this message appended to resume.
                     await self.hooks.emit(PauseTurn(message=assistant_message, reason="pause_turn"))
-                    return assistant_message
+                    yield MessageEnd(message=assistant_message)
+                    return
 
                 if response.stop_reason == "refusal":
-                    # The model refused. Surface as an event and return
+                    # The model refused. Surface as an event and emit
                     # the refusal-only assistant message; the caller can
                     # inspect blocks and decide what to do.
                     await self.hooks.emit(Refusal(message=assistant_message))
-                    return assistant_message
+                    yield MessageEnd(message=assistant_message)
+                    return
 
                 if response.stop_reason != "tool_use":
                     raise RuntimeError(
@@ -398,8 +493,8 @@ class AnthropicRunner:
                         result = speculative_result
                     else:
                         pre_decisions = await self.hooks.emit(PreToolUse(call=call))
-                        # PreToolUse hook decisions: `block` short-circuits to
-                        # an is_error result; `replacement=ToolResult(...)`
+                        # PreToolUse hook decisions: `block` short-circuits
+                        # to an is_error result; `replacement=ToolResult(...)`
                         # short-circuits dispatch with the supplied result
                         # (id patched to the model's call id). First matching
                         # decision wins.
@@ -442,6 +537,8 @@ class AnthropicRunner:
                                 is_error=post_replacement.replacement.is_error,
                             )
 
+                    yield ToolUseEnd(call=call, result=result)
+
                     tool_result_blocks.append(
                         {
                             "type": "tool_result",
@@ -470,205 +567,6 @@ class AnthropicRunner:
             "Increase the cap, constrain the tool surface, or shorten the conversation."
         )
 
-    async def run_stream(
-        self,
-        agent: SubAgent,
-        messages: list[Message],
-    ) -> AsyncIterator[StreamEvent]:
-        """Run the same tool-use loop as `__call__` but yield streaming
-        events as the model generates.
-
-        Per the wave-13a advisor review, this is a parallel method to
-        `__call__` rather than a refactor — `__call__`'s 150 lines of
-        tool-use-loop / speculator / hook / cache-cap / timeout /
-        replacement / pause-refusal logic is too well tested to risk
-        moving wholesale into a generator. The duplication is
-        intentional and bounded; refactoring to share the loop body is
-        a follow-up wave once both paths are proven.
-
-        Yield order, per iteration:
-        - `TextDelta(text=...)` — once per SDK `text` delta event.
-        - `ToolUseStart(call=...)` — once per `content_block_stop` for
-          a tool_use block, *after* speculator.observe but *before*
-          the runner's hook + dispatch cycle.
-        - `ToolUseEnd(call=..., result=...)` — once per dispatched
-          tool call, after the result is finalized.
-
-        At the very end (`end_turn` / `stop_sequence` / `pause_turn` /
-        `refusal`), yields exactly one `MessageEnd(message=...)` and
-        returns. `MessageEnd.message` matches what `__call__` would
-        have returned.
-        """
-        api_messages, system = _translate_in(messages)
-        request = self._build_request(agent, api_messages, system)
-
-        running_history: list[Message] = list(messages)
-
-        for _ in range(self._max_iterations):
-            count = _count_cache_breakpoints(request)
-            if count > _CACHE_BREAKPOINT_LIMIT:
-                raise CacheBreakpointLimitExceeded(
-                    f"Anthropic caps cache breakpoints at "
-                    f"{_CACHE_BREAKPOINT_LIMIT}; got {count}. "
-                    "Remove some `ContentBlock.cache=True` markers, or "
-                    "use `harness.prompts.compact` to trim the prefix."
-                )
-
-            if self._prefix_watcher is not None:
-                await self._prefix_watcher.fingerprint(request)
-
-            if self._speculator is not None:
-                await self._speculator.begin(
-                    history=running_history,
-                    agent=agent,
-                    dispatcher=self.dispatcher,
-                    hooks=self.hooks,
-                )
-
-            try:
-                async with self._stream_with_timeout(request) as stream:
-                    async for event in stream:
-                        # Text deltas: yield as TextDelta.
-                        event_type = getattr(event, "type", None)
-                        if event_type == "text":
-                            text_value = getattr(event, "text", None)
-                            if text_value:
-                                yield TextDelta(text=text_value)
-                            continue
-
-                        # tool_use block done: surface to speculator AND
-                        # yield ToolUseStart so the caller can react
-                        # before the runner dispatches. The dispatch
-                        # itself happens after `get_final_message`.
-                        if (
-                            event_type == "content_block_stop"
-                            and getattr(getattr(event, "content_block", None), "type", None)
-                            == "tool_use"
-                        ):
-                            block = event.content_block
-                            call = ToolCall(
-                                name=block.name,
-                                arguments=dict(block.input),
-                                id=block.id,
-                            )
-                            if self._speculator is not None:
-                                await self._speculator.observe(call)
-                            yield ToolUseStart(call=call)
-                    response = await stream.get_final_message()
-
-                if self._speculator is not None:
-                    await self._speculator.cancel_unobserved()
-
-                assistant_message = _translate_out(response)
-                running_history.append(assistant_message)
-                await self.hooks.emit(PostAssistantMessage(message=assistant_message))
-
-                # Terminal stop reasons: emit MessageEnd and return.
-                if response.stop_reason in ("end_turn", "stop_sequence"):
-                    yield MessageEnd(message=assistant_message)
-                    return
-
-                if response.stop_reason == "pause_turn":
-                    await self.hooks.emit(PauseTurn(message=assistant_message, reason="pause_turn"))
-                    yield MessageEnd(message=assistant_message)
-                    return
-
-                if response.stop_reason == "refusal":
-                    await self.hooks.emit(Refusal(message=assistant_message))
-                    yield MessageEnd(message=assistant_message)
-                    return
-
-                if response.stop_reason != "tool_use":
-                    raise RuntimeError(
-                        f"Unexpected stop_reason from model: {response.stop_reason!r}. "
-                        "Known reasons handled: end_turn, stop_sequence, tool_use, "
-                        "pause_turn, refusal."
-                    )
-
-                request["messages"] = [
-                    *request["messages"],
-                    {"role": "assistant", "content": response.content},
-                ]
-
-                tool_result_blocks: list[dict[str, Any]] = []
-                synthesized_result_blocks: list[ContentBlock] = []
-                for block in response.content:
-                    if block.type != "tool_use":
-                        continue
-                    call = ToolCall(name=block.name, arguments=dict(block.input), id=block.id)
-
-                    speculative_result: ToolResult | None = None
-                    if self._speculator is not None:
-                        speculative_result = await self._speculator.try_resolve(call)
-
-                    if speculative_result is not None:
-                        result = speculative_result
-                    else:
-                        pre_decisions = await self.hooks.emit(PreToolUse(call=call))
-                        blocked = next((d for d in pre_decisions if d.block), None)
-                        replaced = next(
-                            (d for d in pre_decisions if isinstance(d.replacement, ToolResult)),
-                            None,
-                        )
-                        if blocked is not None:
-                            result = ToolResult(
-                                id=block.id,
-                                content=blocked.reason or "blocked by hook",
-                                is_error=True,
-                            )
-                        elif replaced is not None:
-                            assert isinstance(replaced.replacement, ToolResult)
-                            result = ToolResult(
-                                id=block.id,
-                                content=replaced.replacement.content,
-                                is_error=replaced.replacement.is_error,
-                            )
-                        else:
-                            result = await self.dispatcher.dispatch(call)
-
-                        post_decisions = await self.hooks.emit(
-                            PostToolUse(call=call, result=result)
-                        )
-                        post_replacement = next(
-                            (d for d in post_decisions if isinstance(d.replacement, ToolResult)),
-                            None,
-                        )
-                        if post_replacement is not None:
-                            assert isinstance(post_replacement.replacement, ToolResult)
-                            result = ToolResult(
-                                id=block.id,
-                                content=post_replacement.replacement.content,
-                                is_error=post_replacement.replacement.is_error,
-                            )
-
-                    yield ToolUseEnd(call=call, result=result)
-
-                    tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": _serialize_tool_content(result.content),
-                            "is_error": result.is_error,
-                        }
-                    )
-                    synthesized_result_blocks.append(
-                        ContentBlock(type="tool_result", tool_result=result)
-                    )
-
-                request["messages"] = [
-                    *request["messages"],
-                    {"role": "user", "content": tool_result_blocks},
-                ]
-                running_history.append(Message(role="user", content=synthesized_result_blocks))
-            finally:
-                if self._speculator is not None:
-                    await self._speculator.end()
-
-        raise RuntimeError(
-            f"Tool-use loop exceeded max_iterations={self._max_iterations}. "
-            "Increase the cap, constrain the tool surface, or shorten the conversation."
-        )
-
     def _stream_with_timeout(self, request: dict[str, Any]) -> Any:
         """Return a stream context manager, optionally wrapped in a timeout.
 
@@ -678,7 +576,7 @@ class AnthropicRunner:
         helper rather than inlining it keeps the iteration loop body
         readable.
         """
-        ctx = self._client.messages.stream(**request)
+        ctx = self.client.messages.stream(**request)
         if self._timeout_s is None:
             return ctx
         return _TimeoutStreamCtx(ctx, self._timeout_s)
@@ -708,9 +606,21 @@ class _TimeoutStreamCtx:
                 self._inner.__aexit__(exc_type, exc, tb), timeout=self._timeout_s
             )
         except TimeoutError:
-            # The inner stream is being torn down; swallow the timeout
-            # rather than masking the original exception (if any).
-            return False
+            # M1.11: teardown took longer than `timeout_s`. The inner
+            # __aexit__ task has been cancelled by `wait_for`, so the
+            # SDK's httpx connection is now in an indeterminate state —
+            # very likely stuck mid-stream. Swallowing the timeout would
+            # leave the next request inheriting that stuck connection.
+            # Log at WARNING and propagate so the caller knows the
+            # request did not tear down cleanly. The original exception
+            # (if any) is preserved as the implicit context (PEP 3134).
+            logger.warning(
+                "Anthropic stream teardown exceeded timeout_s=%s; "
+                "propagating TimeoutError. The underlying connection may "
+                "be in an indeterminate state.",
+                self._timeout_s,
+            )
+            raise
 
 
 class _TimeoutStream:

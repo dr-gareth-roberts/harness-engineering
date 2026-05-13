@@ -17,6 +17,8 @@ output. `JaccardSimilarity` and `LengthRatio` are zero-dep;
 
 ## Quick example
 
+<!-- reason: illustrative; references undefined record / runner / agent -->
+<!--pytest.mark.skip-->
 ```python
 import asyncio
 from harness import attribute, JaccardSimilarity
@@ -39,6 +41,8 @@ for chunk in result.top_k(3):
 
 Estimate the cost before paying for it:
 
+<!-- reason: illustrative; references undefined record / runner / agent -->
+<!--pytest.mark.skip-->
 ```python
 result = asyncio.run(attribute(
     record, -1, runner, agent,
@@ -50,10 +54,14 @@ print(f"would have made {result.estimated_calls} runner calls")
 
 For embedding-based similarity:
 
+<!-- reason: shell example, not executed in the codeblock gate -->
+<!--pytest.mark.skip-->
 ```bash
 uv add 'harness-engineering-toolkit[attribute]'
 ```
 
+<!-- reason: illustrative; EmbeddingSimilarity needs the [attribute] extra (sentence-transformers) -->
+<!--pytest.mark.skip-->
 ```python
 from harness.attribute import EmbeddingSimilarity
 similarity = EmbeddingSimilarity(model_name="all-MiniLM-L6-v2")

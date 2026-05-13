@@ -7,6 +7,8 @@ test 9 (missing [attribute] extra) live in `test_similarity.py`.
 
 from __future__ import annotations
 
+import base64
+
 from harness.agents.definition import SubAgent
 from harness.attribute import (
     AttributionResult,
@@ -17,7 +19,7 @@ from harness.attribute import (
     chunk_session,
 )
 from harness.memory.record import SessionRecord
-from harness.prompts.messages import ContentBlock, Message, text
+from harness.prompts.messages import ContentBlock, ImageRef, Message, text
 
 
 def _agent() -> SubAgent:
@@ -396,3 +398,119 @@ def test_chunking_unknown_granularity_raises() -> None:
         assert "granularity" in str(exc)
     else:  # pragma: no cover - defensive
         raise AssertionError("expected ValueError")
+
+
+# ---------------------------------------------------------------------------
+# Multimodal — image blocks must contribute to ablation (M1.9)
+
+
+def _b64(payload: bytes) -> str:
+    return base64.b64encode(payload).decode("ascii")
+
+
+async def test_ablating_an_image_message_yields_nonzero_influence() -> None:
+    """Spec test M1.9: a chunk that *is* an image block must register influence.
+
+    Regression: `_extract_text` and `_block_text` previously emitted the
+    empty string for `image` / `file` blocks, so any prefix-similarity
+    function would see no change when an image was ablated — the
+    influence score was structurally pinned to 0.0 and multimodal
+    regressions were invisible to `attribute()`.
+
+    Setup: a fake runner whose response includes the image's stable
+    fingerprint when the image is present, and a fallback otherwise.
+    Ablating the image-bearing message strips the fingerprint from the
+    prefix, shifts the runner's reply, and Jaccard registers a drop in
+    similarity → non-zero influence score for the image chunk.
+    """
+    image = ImageRef(source="base64", media_type="image/png", data=_b64(b"\x89PNG-cause"))
+
+    image_message = Message(
+        role="user",
+        content=[ContentBlock(type="image", image=image)],
+    )
+    record = _record(
+        [
+            text("user", "alpha"),
+            image_message,
+            text("user", "gamma"),
+            text("assistant", "the runner cites the image fingerprint as cause"),
+        ]
+    )
+
+    async def image_aware_runner(_agent: SubAgent, messages: list[Message]) -> Message:
+        seen_image = any(block.type == "image" for msg in messages for block in msg.content)
+        if seen_image:
+            return text("assistant", "the runner cites the image fingerprint as cause")
+        return text("assistant", "the runner saw no image and falls back to text only")
+
+    result = await attribute(
+        record,
+        target_message_index=-1,
+        runner=image_aware_runner,
+        agent=_agent(),
+        granularity="message",
+        similarity=JaccardSimilarity(),
+    )
+
+    image_chunks = [c for c in result.chunks if c.message_index == 1]
+    assert len(image_chunks) == 1, "expected exactly one chunk for the image-bearing message"
+    image_chunk = image_chunks[0]
+    assert image_chunk.score > 0.0, (
+        "ablating the image message must produce a non-zero influence score; "
+        "previously the score was pinned to 0.0 because image blocks rendered "
+        "as the empty string"
+    )
+
+    # And the image chunk should outrank the inert text chunks that don't
+    # gate the runner's behaviour at all.
+    inert_chunks = [c for c in result.chunks if c.message_index in (0, 2)]
+    assert all(image_chunk.score >= c.score for c in inert_chunks)
+
+
+async def test_ablating_an_image_at_block_granularity_surfaces_influence() -> None:
+    """Block-granularity ablation must also see image blocks.
+
+    A user message that bundles both prose and an image should split into
+    two block chunks; dropping the image block alone shifts the runner
+    response and produces non-zero influence.
+    """
+    image = ImageRef(source="base64", media_type="image/png", data=_b64(b"\x89PNG-block"))
+    mixed_message = Message(
+        role="user",
+        content=[
+            ContentBlock(type="text", text="please describe"),
+            ContentBlock(type="image", image=image),
+        ],
+    )
+    record = _record(
+        [
+            mixed_message,
+            text("assistant", "image-conditioned reply"),
+        ]
+    )
+
+    async def image_gated_runner(_agent: SubAgent, messages: list[Message]) -> Message:
+        seen_image = any(block.type == "image" for msg in messages for block in msg.content)
+        if seen_image:
+            return text("assistant", "image-conditioned reply")
+        return text("assistant", "no image so no description")
+
+    result = await attribute(
+        record,
+        target_message_index=-1,
+        runner=image_gated_runner,
+        agent=_agent(),
+        granularity="block",
+        similarity=JaccardSimilarity(),
+    )
+
+    # Two chunks expected — one per block in the prefix message.
+    assert len(result.chunks) == 2
+    image_chunk = next(c for c in result.chunks if c.block_index == 1)
+    text_chunk = next(c for c in result.chunks if c.block_index == 0)
+    assert image_chunk.score > 0.0
+    # Removing only the prose leaves the image (and so the gated reply)
+    # intact: the runner still says "image-conditioned reply", which is
+    # exactly the target, so influence is 0.
+    assert text_chunk.score == 0.0

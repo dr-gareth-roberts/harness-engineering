@@ -31,6 +31,8 @@ All three drive the same `DebugContext`; only the I/O layer differs.
 You have `session.json` saved from production. Pause right before
 turn 3 (the bad one):
 
+<!-- reason: shell example referring to a non-existent session.json -->
+<!--pytest.mark.skip-->
 ```bash
 uv run harness debug session.json --break turn=3
 ```
@@ -60,6 +62,8 @@ what the model would have produced for this turn. Useful for
 
 ### CLI: pause when a specific tool is called
 
+<!-- reason: shell example referring to a non-existent session.json -->
+<!--pytest.mark.skip-->
 ```bash
 uv run harness debug session.json --break tool=delete_user
 ```
@@ -73,6 +77,8 @@ Combined with `mutate`, you can rewrite the call to something safe
 Wave 7 added a DAP server so VS Code's debugger UI works against
 recorded sessions:
 
+<!-- reason: shell example referring to a non-existent session.json -->
+<!--pytest.mark.skip-->
 ```bash
 uv run harness debug session.json --dap
 ```
@@ -99,6 +105,8 @@ opt-in debug session.
 
 ### Programmatic: pause-and-script for automated repro
 
+<!-- reason: illustrative; references undefined dispatcher / hooks / text and uses placeholder AnthropicRunner(...) -->
+<!--pytest.mark.skip-->
 ```python
 from harness import DebugContext, DebugRunner, Orchestrator
 
@@ -128,10 +136,14 @@ orchestrator = Orchestrator(dispatcher, hooks, debug)
   want the model to also run, don't mutate.
 - **`abort()` raises `DebugAborted`** — catch it at the orchestrator
   level if you want graceful shutdown.
-- **DAP `step_in` currently aliases `step_over`** — agent
-  trajectories don't have a meaningful "step into the tool handler"
-  granularity yet (the runner doesn't expose that surface). Tracked
-  as a follow-up; `next` / `stepOut` work as expected.
+- **DAP `step_in` semantics (1.2.0+)** — as of M3.6, `stepIn` is a
+  first-class request: it runs until the next `PreToolUse` event
+  and pauses inside the tool frame, with a turn-boundary fallback
+  if no further tool dispatch arrives. Pre-1.2.0 it aliased
+  `step_over`. See [`docs/modules/debug.md`](../modules/debug.md)
+  for the current step-request -> frame mapping (including the
+  `stepOut` semantics that depend on whether you're in an
+  orchestrator or tool frame).
 - **The CLI's REPL `inspect` command runs arbitrary Python** against
   the paused context. By design — it's a debugger. Don't expose
   this surface to untrusted users.

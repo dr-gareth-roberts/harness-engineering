@@ -27,6 +27,8 @@ You have a recorded agent trajectory. You want to:
 
 ### Replay a single recorded session
 
+<!-- reason: needs a session.json on disk; illustrative -->
+<!--pytest.mark.skip-->
 ```python
 import asyncio
 from pathlib import Path
@@ -55,6 +57,8 @@ print(reply.content[0].text)
 
 ### Batch evaluate
 
+<!-- reason: needs the [anthropic] extra and a real dispatcher; uses `await` at module scope -->
+<!--pytest.mark.skip-->
 ```python
 from harness import (
     AnthropicRunner, Dispatcher, EvalCase, HookRunner, Orchestrator,
@@ -92,6 +96,8 @@ over `r.record.messages`.
 
 ### Cross-provider differential matrix
 
+<!-- reason: needs [anthropic] and [openai-compat] extras; uses `await` at module scope -->
+<!--pytest.mark.skip-->
 ```python
 from harness import AnthropicRunner, OpenAICompatRunner, diff_eval
 
@@ -128,6 +134,8 @@ detection highlighting the dissenter when 2 of 3 agree.
 Sometimes you want to mutate one turn in a recorded session and see
 how the rest plays out:
 
+<!-- reason: needs the [anthropic] extra; uses `await` at module scope and references undefined record / dispatcher / orchestrator -->
+<!--pytest.mark.skip-->
 ```python
 from harness import counterfactual, RewriteTurn
 

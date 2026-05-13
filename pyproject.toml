@@ -8,7 +8,7 @@ build-backend = "hatchling.build"
 # instead. The importable module name remains `harness` — only the
 # distribution name changes, so user code is unaffected.
 name = "harness-engineering-toolkit"
-version = "1.0.2"
+version = "1.3.0"
 description = "Opensource toolbox for harness engineering."
 readme = "README.md"
 license = "Apache-2.0"
@@ -64,7 +64,7 @@ exclude_also = [
 ]
 # Fail the run if total coverage drops below this threshold. Bumped
 # upward when we add tests; lowered only with explicit justification.
-fail_under = 85
+fail_under = 88
 show_missing = true
 skip_covered = false
 

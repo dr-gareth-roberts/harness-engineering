@@ -18,6 +18,7 @@ Wiring (typically from `harness.debug.cli`):
         breakpoint_callback=adapter.breakpoint_callback,
         dispatcher=dispatcher,
     )
+    adapter.attach_hooks(hooks)  # M3.6 — enables frame-aware stepping
     adapter.run_session = lambda: _drive(orchestrator, record)
     adapter.synthesize_source = lambda: _trajectory_lines(record)
     await adapter.serve(reader, writer)
@@ -29,16 +30,43 @@ DAP subset implemented:
   continue, next, stepIn, stepOut, pause, terminate, disconnect.
 - Events: initialized, stopped, continued, output, terminated, exited.
 
-Stepping and pause (Wave 13b): `next` and `stepIn` both set
-`_step_mode = "step_over"` — the runner resumes from the current
-breakpoint and `break_on_predicate` auto-fires again at the next
-runner invocation (typically the next iteration of the tool-use
-loop). `stepOut` sets `_step_mode = "step_out"`, which currently has
-the same per-turn granularity as step-over; a richer "skip remaining
-tool calls until end_turn" granularity is a follow-up. `pause` sets
-`_pause_requested` so `break_on_predicate` fires unconditionally at
-the next opportunity, making the editor's pause button responsive
+Stepping and pause (M3.6 / Wave 13b): the harness execution model
+distinguishes two frame kinds — `orchestrator` (between tool
+dispatches, including the assistant message that triggers them) and
+`tool` (inside a single tool dispatch, between `PreToolUse` and
+`PostToolUse`). The three step requests have distinct semantics:
+
+- `next` (step_over): run to the next turn boundary, ignoring tool
+  dispatches in between. `break_on_predicate` fires at the next
+  `DebugRunner.__call__`. This is the pre-1.1.0 behavior that the
+  other two step kinds also aliased to; M3.6 splits them apart.
+- `stepIn` (step_in): run until the next `PreToolUse` event, then
+  pause inside the tool frame. Fallback: if no further tool dispatch
+  happens before the next turn boundary, pause at that turn boundary
+  instead — so the editor's step-in button is never silently
+  unresponsive.
+- `stepOut` (step_out): from inside a tool frame, run until the
+  current dispatch's `PostToolUse` fires, then pause at the next
+  event (another `PreToolUse` in the same tool-use loop, or the next
+  turn boundary). From outside a tool frame, step_out has no outer
+  frame to return to — it falls back to step_over semantics.
+
+`pause` sets `_pause_requested` so `break_on_predicate` (and the
+hook-based pause path) fires unconditionally at the next
+opportunity, making the editor's pause button responsive
 mid-trajectory.
+
+Frame tracking requires the adapter to observe `PreToolUse` /
+`PostToolUse` events directly: `DebugRunner.break_on` runs only at
+turn boundaries, so a tool-frame pause point can't come from
+`break_on`. Callers wire this with `adapter.attach_hooks(hooks)`,
+registering listeners that update `_current_frame` and, when the
+step mode demands it, synthesize a breakpoint by invoking
+`breakpoint_callback` from within the hook handler. If
+`attach_hooks` is never called (legacy wiring), `stepIn` /
+`stepOut` degrade to step_over — `break_on_predicate` still fires
+at the next turn boundary, so the editor's button isn't ignored;
+it just operates at coarser granularity.
 
 `evaluate` is limited to looking up the same fields the `variables`
 view exposes (`turn_index`, `message_count`, `last_call.name`,
@@ -57,7 +85,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from harness.debug.dap_messages import (
     Breakpoint,
@@ -71,11 +99,27 @@ from harness.debug.dap_protocol import DapProtocolError, read_message, write_mes
 
 if TYPE_CHECKING:
     from harness.debug.context import DebugContext
+    from harness.hooks.events import PostToolUse, PreToolUse
+    from harness.hooks.runner import HookRunner
 
 BreakpointCallback = Callable[["DebugContext"], Awaitable[None]]
 BreakPredicate = Callable[["DebugContext"], bool]
 SourceProvider = Callable[[], list[str]]
 SessionRunner = Callable[[], Awaitable[None]]
+
+# Step modes the DAP adapter understands. See module docstring for the
+# precise semantics of each:
+# - `step_over` (DAP `next`): run to next turn boundary.
+# - `step_in`  (DAP `stepIn`): run to next `PreToolUse`, then pause.
+# - `step_out` (DAP `stepOut`): from tool frame, run past current
+#   `PostToolUse`, pause on the next event.
+StepMode = Literal["step_over", "step_in", "step_out"]
+
+# The execution frame the adapter believes the session is currently
+# in. `None` before the session has fired any tool events; the
+# adapter conservatively treats `None` as "orchestrator" for stepping
+# decisions (step_out has no inner frame to leave).
+Frame = Literal["orchestrator", "tool"]
 
 
 class DapAdapter:
@@ -104,16 +148,46 @@ class DapAdapter:
         # check fires unconditionally so the next runner invocation
         # pauses. Cleared automatically once consumed.
         self._pause_requested = False
-        # Wave 13b #15 — step semantics. When set, the next break_on
-        # check fires for the matching step type, then clears.
-        # `step_over` (next): break before the next runner invocation
-        # (step over a tool call).
-        # `step_in`: break in the next PreToolUse hook (step into the
-        # tool's handler).
-        # `step_out`: break before the next assistant message produces
-        # (effectively the same as step_over today, until the runner
-        # exposes finer granularity).
-        self._step_mode: str | None = None
+        # M3.6 — step semantics. Each step kind drives a different
+        # break point; see module docstring for the full table. The
+        # field clears once the matching break fires. `None` means no
+        # step is in progress (just `continue` or a freshly-set
+        # breakpoint).
+        self._step_mode: StepMode | None = None
+        # M3.6 — execution frame tracking. Updated by the `PreToolUse`
+        # / `PostToolUse` hook listeners registered via
+        # `attach_hooks`. `None` means we have no signal yet (no tool
+        # event has been observed); stepping treats that as
+        # "orchestrator" since the orchestrator frame is the natural
+        # default when the session begins.
+        self._current_frame: Frame | None = None
+        # M3.6 — when step_out fires while inside a tool frame, this
+        # flag is set in the `PostToolUse` handler so the next event
+        # (the next `PreToolUse` of a later call, or the next turn
+        # boundary, whichever comes first) becomes a breakpoint. It
+        # clears on consumption.
+        self._break_on_next_event = False
+
+        # M3.6 — most recent `ToolCall` observed via `PreToolUse`,
+        # cached so the hook-synthesized DebugContext at the tool
+        # frame has a `last_call` (the same field the orchestrator
+        # frame already populates). Reset on `PostToolUse`.
+        self._active_tool_call: Any = None  # ToolCall | None — Any keeps imports lazy.
+
+        # Most recent turn index observed at a turn-boundary check.
+        # `_break_in_tool_frame` synthesizes a `DebugContext` for the
+        # hook-driven pause path and needs a turn_index that reflects
+        # the real session progress — otherwise the DAP `stackTrace`
+        # response would map every tool-frame pause to source line 1
+        # regardless of how deep into the trajectory we are. Updated
+        # in two places (belt-and-suspenders):
+        #   1. Every consult of `break_on_predicate` — covers the
+        #      pause-mid-trajectory case where no turn-boundary
+        #      breakpoint has fired yet.
+        #   2. Every entry to `_on_breakpoint` — covers the case where
+        #      a turn-boundary breakpoint fired and the editor then
+        #      stepped into a tool frame.
+        self._last_known_turn_index: int = 0
 
         # Outgoing message sequence. DAP requires a strictly increasing
         # `seq` on every adapter→editor message.
@@ -126,6 +200,15 @@ class DapAdapter:
         self._session_task: asyncio.Task[None] | None = None
         self._launched = False
         self._terminated = False
+
+        # M1.8 — guard against duplicate lifecycle events on disconnect.
+        # Both the session task's `finally` block and `_shutdown_session`
+        # (under `reason="disconnect"`) want to emit `terminated`; whichever
+        # fires first sets this, the other no-ops. Same discipline applied
+        # to `exited` so the same guard protects both lifecycle endpoints
+        # uniformly across the disconnect and terminate paths.
+        self._terminated_emitted: bool = False
+        self._exited_emitted: bool = False
 
         # Wave 13b #17 — opt-in arbitrary expression evaluation in DAP
         # `evaluate`. Off by default; the editor passes `allowEvaluate:
@@ -148,25 +231,57 @@ class DapAdapter:
         `setBreakpoints` / `pause` / `next`-`stepIn`-`stepOut` can
         mutate state without rebuilding the runner.
 
-        Order:
-        - If `pause` was requested, fire (and clear the flag).
-        - If `step_over` / `step_out` is set, fire (and clear). Step-in
-          uses a different break point — it's a one-shot PreToolUse
-          hook the runner installs separately, not break_on. So
-          break_on doesn't react to step_in.
+        `DebugRunner` calls this once per `__call__` (per turn
+        boundary). It does not fire mid-tool-dispatch — that's what
+        the `attach_hooks` PreToolUse / PostToolUse listeners are
+        for.
+
+        Order of precedence:
+        - `pause` requested → fire (and clear the flag).
+        - `_break_on_next_event` set (step_out aftermath when the
+          next event is a turn boundary) → fire.
+        - `step_over` set → fire (turn-boundary semantics; the
+          natural granularity of `break_on`).
+        - `step_in` / `step_out` set → fire as a graceful fallback.
+          The hook listeners are responsible for the precise
+          frame-aware pause; if no tool dispatch happens between this
+          step request and the next turn boundary, the editor's step
+          button should still pause *somewhere* rather than silently
+          ignoring the click.
         - Otherwise, the per-turn breakpoints from setBreakpoints.
         """
 
         def _break(ctx: DebugContext) -> bool:
+            # Track the most recent real turn_index every consult, so a
+            # subsequent hook-driven pause inside a tool frame can
+            # synthesize a `DebugContext` whose `turn_index` matches
+            # actual session progress. Updated on every call (not just
+            # when the predicate returns True) so a pause-button press
+            # mid-trajectory — before any breakpoint has fired — still
+            # produces an accurate source-line mapping.
+            self._last_known_turn_index = ctx.turn_index
             if self._pause_requested:
                 # Consume the request once it fires so a follow-up
                 # `continue` doesn't immediately re-pause.
                 self._pause_requested = False
                 return True
-            if self._step_mode in ("step_over", "step_out"):
-                # Step over a tool call (next) and step out (return to
-                # assistant) both pause before the next runner
-                # invocation. Cleared after consumption.
+            if self._break_on_next_event:
+                # step_out aftermath: PostToolUse already fired and we
+                # arrived at the next turn boundary without seeing
+                # another PreToolUse in between. Pause here as the
+                # fallback "next event" target.
+                self._break_on_next_event = False
+                return True
+            if self._step_mode == "step_over":
+                # Step over a tool call (next): pause at the next
+                # runner invocation. Cleared on consumption.
+                self._step_mode = None
+                return True
+            if self._step_mode in ("step_in", "step_out"):
+                # Fallback path — see module docstring. The hook
+                # listeners are the primary handler; this catches the
+                # "no further tool dispatch" case so a step button is
+                # never silently ignored.
                 self._step_mode = None
                 return True
             return ctx.turn_index in self._breakpoint_turns
@@ -179,6 +294,116 @@ class DapAdapter:
         hits. Parks until the editor sends `continue` or `disconnect`.
         """
         return self._on_breakpoint
+
+    # ------------------------------------------------------------------ hooks
+
+    def attach_hooks(self, hooks: HookRunner) -> None:
+        """Register `PreToolUse` / `PostToolUse` listeners so the adapter
+        can track the current execution frame and synthesize tool-frame
+        breakpoints for `stepIn` / `stepOut`.
+
+        Wire after constructing the `HookRunner` and before starting
+        the orchestrator session. Calling this is required for true
+        frame-aware stepping; if omitted, `stepIn` / `stepOut`
+        degrade gracefully to step-over (the runner's break_on
+        predicate still fires at the next turn boundary, so the
+        editor button isn't silently ignored — it just operates at
+        coarser granularity).
+
+        Pre-1.1.0 behavior: `stepIn` / `stepOut` had no hook
+        listeners at all and were hard-aliased to step_over. M3.6
+        fixed this for both wiring paths: the new hook listeners
+        track frame state, and `break_on_predicate` carries the
+        no-tool-dispatch fallback.
+        """
+        # Local import to keep top-level imports lean and avoid a
+        # circular import on `harness.hooks.events` (which transitively
+        # depends on `harness.prompts.messages`).
+        from harness.hooks.events import PostToolUse as _PostToolUse
+        from harness.hooks.events import PreToolUse as _PreToolUse
+
+        hooks.register(_PreToolUse, self._on_pre_tool_use)
+        hooks.register(_PostToolUse, self._on_post_tool_use)
+
+    async def _on_pre_tool_use(self, event: PreToolUse) -> None:
+        """`PreToolUse` listener. Enters the tool frame and, if the
+        editor asked for a tool-frame pause (step_in, or a step_out
+        whose successor is another tool call), synthesizes a
+        breakpoint by invoking `breakpoint_callback` directly.
+
+        Returns no `HookDecision` — this listener is purely
+        observational from the hook runner's perspective (a paused
+        tool dispatch still resumes through the same dispatch path
+        once the editor sends `continue`).
+        """
+        self._current_frame = "tool"
+        self._active_tool_call = event.call
+
+        should_break = False
+        if self._step_mode == "step_in":
+            self._step_mode = None
+            should_break = True
+        elif self._break_on_next_event:
+            # step_out's PostToolUse handler set this — pause at the
+            # next PreToolUse if there is one before the next turn
+            # boundary.
+            self._break_on_next_event = False
+            should_break = True
+        elif self._pause_requested:
+            # Editor pressed pause while mid-tool-loop — honor it at
+            # the next PreToolUse rather than waiting for the next
+            # turn boundary.
+            self._pause_requested = False
+            should_break = True
+
+        if should_break:
+            await self._break_in_tool_frame(event.call)
+
+    async def _on_post_tool_use(self, event: PostToolUse) -> None:
+        """`PostToolUse` listener. Leaves the tool frame. If the editor
+        asked for step_out from this frame, arm `_break_on_next_event`
+        so the very next event (another PreToolUse or the next turn
+        boundary) pauses.
+        """
+        self._current_frame = "orchestrator"
+        self._active_tool_call = None
+
+        if self._step_mode == "step_out":
+            # The pause point for step_out is the *next* event after
+            # the current dispatch completes. Disarm the step flag and
+            # arm the next-event trap.
+            self._step_mode = None
+            self._break_on_next_event = True
+
+    async def _break_in_tool_frame(self, call: Any) -> None:
+        """Synthesize a `DebugContext` pinned to the current tool frame
+        and route through the same `_on_breakpoint` parking path the
+        turn-boundary breakpoints use.
+
+        The context is intentionally minimal — `last_call` is the
+        tool we're entering, `turn_index` carries the most recent
+        turn index observed at a turn boundary (or the most recent
+        `_on_breakpoint` entry), and `messages` is empty.
+
+        `turn_index` is *not* hard-coded to 0: the DAP `stackTrace`
+        response maps `ctx.turn_index + 1` directly to the displayed
+        source line, so a hard-coded zero would mislocate every
+        tool-frame pause to source line 1 regardless of how deep into
+        the trajectory we are. `_last_known_turn_index` is kept in
+        sync by `break_on_predicate` (every consult) and
+        `_on_breakpoint` (every turn-boundary pause), so by the time
+        a `PreToolUse`-driven pause synthesizes this context the
+        value reflects actual session progress.
+
+        Editors typically read the other fields through `variables` /
+        `evaluate`; the values are honest about what's known at this
+        point (we're between turn-boundary checkpoints).
+        """
+        # Local import to avoid a top-level dependency cycle.
+        from harness.debug.context import DebugContext
+
+        ctx = DebugContext([], last_call=call, turn_index=self._last_known_turn_index)
+        await self._on_breakpoint(ctx)
 
     # ------------------------------------------------------------------ serve
 
@@ -308,34 +533,40 @@ class DapAdapter:
         await self._resume_breakpoint()
 
     async def _on_next(self, seq: int, args: dict[str, Any]) -> None:
-        # Wave 13b #15 — step over the next tool call. Set the step
-        # flag so the next break_on check fires; resume the current
-        # breakpoint so the runner advances. The `break_on` predicate
-        # then auto-pauses again when the next runner invocation
-        # starts (typically the next iteration of the tool-use loop).
+        # M3.6 — step over the next tool call. The `break_on`
+        # predicate fires at the next turn boundary regardless of how
+        # many tool dispatches occur in between, so the editor's
+        # "next" button skips all of them.
         self._step_mode = "step_over"
         await self._respond(seq, "next")
         await self._resume_breakpoint()
 
     async def _on_stepIn(self, seq: int, args: dict[str, Any]) -> None:
-        # Wave 13b #15 — step into. Today, agent trajectories don't
-        # have a separate "tool handler" frame the debugger could step
-        # into; the closest thing is "stop right after the next tool
-        # call returns." Use the same step_over semantics for now;
-        # documented as a follow-up to enrich with a one-shot
-        # PreToolUse breakpoint when the DebugRunner exposes that
-        # surface.
-        self._step_mode = "step_over"
+        # M3.6 — step into the next tool dispatch. The `PreToolUse`
+        # hook listener (registered via `attach_hooks`) synthesizes a
+        # breakpoint inside the tool frame the moment the next tool
+        # call begins. Fallback: if no tool dispatch happens before
+        # the next turn boundary, `break_on_predicate` pauses there
+        # so the button isn't silently ignored.
+        self._step_mode = "step_in"
         await self._respond(seq, "stepIn")
         await self._resume_breakpoint()
 
     async def _on_stepOut(self, seq: int, args: dict[str, Any]) -> None:
-        # Wave 13b #15 — step out. Run to the next assistant message,
-        # then pause. Today the granularity is the same as step_over
-        # (per-turn). When the runner grows finer step granularity,
-        # this can become "ignore the next N tool calls until we see
-        # an end_turn."
-        self._step_mode = "step_out"
+        # M3.6 — step out of the current frame. From a tool frame
+        # (paused inside a tool dispatch), the `PostToolUse` listener
+        # arms `_break_on_next_event` so the very next event — either
+        # another tool call's `PreToolUse` or the next turn boundary
+        # — pauses. From an orchestrator frame (no outer frame to
+        # return to), step_out falls back to step_over: pause at the
+        # next turn boundary. See module docstring for the table.
+        if self._current_frame == "tool":
+            self._step_mode = "step_out"
+        else:
+            # Graceful fallback — there's no "outer" frame to return
+            # to from the orchestrator, so step_out matches step_over
+            # in this case.
+            self._step_mode = "step_over"
         await self._respond(seq, "stepOut")
         await self._resume_breakpoint()
 
@@ -515,6 +746,12 @@ class DapAdapter:
         `_continue_event` until the editor decides what to do.
         """
         self._current_ctx = ctx
+        # Keep the last-known turn index in sync so a subsequent
+        # `stepIn` into a tool frame synthesizes a `DebugContext` with
+        # the correct `turn_index` (and therefore the right DAP source
+        # line). Covers the common flow: turn-boundary break → editor
+        # presses stepIn → `_break_in_tool_frame` fires.
+        self._last_known_turn_index = ctx.turn_index
         self._continue_event.clear()
         await self._send_event(
             "stopped",
@@ -559,22 +796,53 @@ class DapAdapter:
                 category="stderr",
             )
         finally:
-            await self._send_event(
-                "terminated",
-                body={},
-            )
-            await self._send_event("exited", body={"exitCode": 0})
+            # Idempotent emit (M1.8) — `_shutdown_session(reason="disconnect")`
+            # may have already raced ahead and emitted these, or may be
+            # about to. The flags ensure the editor sees `terminated` +
+            # `exited` exactly once per session lifecycle.
+            await self._emit_terminated_once()
+            await self._emit_exited_once()
 
     async def _shutdown_session(self, *, reason: str) -> None:
         """Terminate or disconnect: abort the current breakpoint, cancel
         the session task, drain it.
+
+        Lifecycle events are routed through `_emit_*_once` helpers so
+        whichever of this method or the session task's `finally` runs
+        first wins, and the other no-ops. Same discipline on both the
+        disconnect and terminate paths.
         """
         if self._current_ctx is not None:
             self._current_ctx.abort()
             self._continue_event.set()
         await self._cleanup_session()
         if reason == "disconnect":
-            await self._send_event("terminated", body={})
+            await self._emit_terminated_once()
+
+    async def _emit_terminated_once(self) -> None:
+        """Emit the `terminated` lifecycle event at most once per session.
+
+        DAP requires `terminated` so the editor can wind down its UI;
+        emitting it twice (which the legacy disconnect path did — once
+        from the session task's `finally`, once from `_shutdown_session`)
+        confuses editors that track state machines. See M1.8.
+        """
+        if self._terminated_emitted:
+            return
+        self._terminated_emitted = True
+        await self._send_event("terminated", body={})
+
+    async def _emit_exited_once(self) -> None:
+        """Emit the `exited` lifecycle event at most once per session.
+
+        Symmetric to `_emit_terminated_once`; same uniform guard so any
+        future call site can rely on at-most-once semantics without
+        threading the flag through call paths.
+        """
+        if self._exited_emitted:
+            return
+        self._exited_emitted = True
+        await self._send_event("exited", body={"exitCode": 0})
 
     async def _cleanup_session(self) -> None:
         task = self._session_task

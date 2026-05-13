@@ -1030,3 +1030,115 @@ async def test_refusal_emits_event_and_returns_refusal_message() -> None:
     assert "can't help" in (result.content[0].text or "")
     assert len(seen) == 1
     assert seen[0].message is result
+
+
+# ---------------------------------------------------------------------------
+# M1.11: teardown-timeout no longer silently swallowed
+
+
+async def test_teardown_timeout_logs_and_propagates(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the stream's `__aexit__` exceeds `timeout_s`, the runner logs
+    at WARNING and propagates TimeoutError rather than swallowing it.
+
+    A swallowed teardown timeout would let the next request inherit a
+    connection in an indeterminate state — that's the bug M1.11 fixes.
+    """
+    import logging
+
+    response = FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")
+    # `__aenter__` and iteration are fast; `__aexit__` sleeps past the
+    # 50ms budget. The runner finishes `get_final_message` cleanly and
+    # then hits the timeout on teardown.
+    client = FakeAsyncAnthropic(responses=[response], exit_delay=0.2)
+    dispatcher, _ = _echo_dispatcher()
+
+    runner = AnthropicRunner(
+        dispatcher,
+        HookRunner(),
+        client=client,  # type: ignore[arg-type]
+        timeout_s=0.05,
+    )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="harness.runner.anthropic"),
+        pytest.raises(TimeoutError),
+    ):
+        await runner(_agent(), [text("user", "hi")])
+
+    # Logger emitted a WARNING that names the timeout and connection
+    # state — operators reading the log learn why the request failed.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("teardown" in r.message for r in warnings)
+    assert any("timeout_s" in r.message for r in warnings)
+
+
+# ---------------------------------------------------------------------------
+# M1.26: lazy client construction
+
+
+def test_runner_instantiates_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`AnthropicRunner(...)` with no `client=` and no API key in the
+    environment must not raise — the SDK client is constructed lazily
+    on first call. Pre-M1.26 this raised at __init__.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+    dispatcher, _ = _echo_dispatcher()
+    # Should not raise even without an API key configured.
+    runner = AnthropicRunner(dispatcher, HookRunner())
+    # _client stays None until first access.
+    assert runner._client is None
+
+
+def test_runner_uses_injected_client_without_constructing_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-constructed `client=` bypasses the SDK factory entirely.
+    Verify by removing the env vars the SDK would read and confirming
+    the runner still drives a call through the injected fake.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+    response = FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")
+    client = FakeAsyncAnthropic(responses=[response])
+    dispatcher, _ = _echo_dispatcher()
+    runner = AnthropicRunner(dispatcher, HookRunner(), client=client)  # type: ignore[arg-type]
+
+    # The fake client was wired in at __init__; no env-driven SDK
+    # construction should ever happen for this runner. (The `client=`
+    # kwarg already carries a `# type: ignore[arg-type]` because the
+    # fake doesn't subclass AsyncAnthropic; the identity check here
+    # inherits the same narrowing gap.)
+    assert runner._client is client  # type: ignore[comparison-overlap]
+
+
+async def test_lazy_client_property_caches_after_first_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `client` property constructs `AsyncAnthropic()` lazily and
+    caches the instance. Two accesses return the same object.
+    """
+    sentinel = object()
+    call_count = 0
+
+    def fake_factory() -> Any:
+        nonlocal call_count
+        call_count += 1
+        return sentinel
+
+    # Patch the AsyncAnthropic symbol the runner module sees so we can
+    # observe construction without needing a real API key.
+    monkeypatch.setattr("harness.runner.anthropic.AsyncAnthropic", fake_factory)
+
+    dispatcher, _ = _echo_dispatcher()
+    runner = AnthropicRunner(dispatcher, HookRunner())
+    assert runner._client is None
+    first = runner.client
+    second = runner.client
+    assert first is sentinel
+    assert second is sentinel
+    assert call_count == 1  # constructed once, cached thereafter

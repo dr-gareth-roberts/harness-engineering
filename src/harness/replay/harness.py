@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -9,7 +12,7 @@ from harness.agents.orchestrator import Orchestrator
 from harness.memory.record import SessionRecord
 from harness.memory.session import Session
 from harness.memory.store import InMemoryStore
-from harness.prompts.messages import ContentBlock, Message
+from harness.prompts.messages import ContentBlock, ImageRef, Message
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,14 @@ def _normalize_message(msg: Message) -> tuple[str, str, tuple[Any, ...]]:
     - Drops `tool_use.id` and `tool_result.tool_use_id`; those are
       model-assigned and would diverge across runs even when behaviour is
       identical.
+    - Hashes image payloads (or records the URL) plus `media_type` so two
+      sessions that differ only by an image attachment compare as non-equal.
+    - Includes `file_id` and `path` so file-attached sessions compare
+      structurally.
+    - Any block type that isn't recognized here is emitted as a sentinel
+      `("unknown", ...)` tuple so a future block type that lands without
+      this normalizer being taught about it fails loudly in tests rather
+      than masking multimodal regressions.
     """
     text_chunks: list[str] = []
     structured: list[Any] = []
@@ -92,8 +103,38 @@ def _normalize_message(msg: Message) -> tuple[str, str, tuple[Any, ...]]:
             tr = block.tool_result
             structured.append(("tool_result", tr.content, tr.is_error))
         elif block.type == "file":
-            structured.append(("file", block.path, block.text))
+            structured.append(("file", block.path, block.text, block.file_id))
+        elif block.type == "image":
+            structured.append(_image_fingerprint(block.image))
+        else:
+            # Unknown / unhandled block type. Emit a sentinel so two sessions
+            # differing only by such a block do not silently compare equal.
+            structured.append(("unknown", block.type, block.model_dump(mode="json")))
     return msg.role, "".join(text_chunks), tuple(structured)
+
+
+def _image_fingerprint(image: ImageRef | None) -> tuple[Any, ...]:
+    """Stable fingerprint for an `image` content block.
+
+    - `source="base64"` → SHA-256 hex digest of the decoded image bytes.
+      If the payload doesn't decode as base64 we fall back to hashing the
+      raw string so two malformed-but-different payloads still diverge.
+    - `source="url"` → the URL string verbatim.
+    - `image is None` → a sentinel tuple. An `image`-typed block without
+      payload is a structural bug, but we'd rather surface it as a diff
+      than mask it.
+    """
+    if image is None:
+        return ("image", None, None, None)
+    if image.source == "base64":
+        try:
+            decoded = base64.b64decode(image.data, validate=True)
+        except (binascii.Error, ValueError):
+            digest = hashlib.sha256(image.data.encode("utf-8")).hexdigest()
+            return ("image", "base64-raw", image.media_type, digest)
+        digest = hashlib.sha256(decoded).hexdigest()
+        return ("image", "base64", image.media_type, digest)
+    return ("image", "url", image.media_type, image.data)
 
 
 def _sorted_dict(d: dict[str, Any]) -> tuple[tuple[str, Any], ...]:

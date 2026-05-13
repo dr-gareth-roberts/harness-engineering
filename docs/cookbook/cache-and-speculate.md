@@ -25,6 +25,8 @@ and stores the fingerprints in a `FingerprintStore`. Every subsequent
 request, it compares the live fingerprint against the stored one and
 emits a `DriftEvent` if they differ.
 
+<!-- reason: illustrative; AnthropicRunner needs Dispatcher with tools and the [anthropic] extra -->
+<!--pytest.mark.skip-->
 ```python
 from harness import (
     AnthropicRunner,
@@ -77,6 +79,8 @@ entirely. On miss, the speculation is cancelled — at stream-end at
 the latest, eagerly inside `observe()` for the simple
 `max_speculations=1` case.
 
+<!-- reason: illustrative; references undefined dispatcher / hooks and needs the [anthropic] extra -->
+<!--pytest.mark.skip-->
 ```python
 from harness import LastCallPredictor, Speculator
 
@@ -98,6 +102,8 @@ from the union, so a fresh agent benefits from past patterns.
 
 Anything satisfying the `Predictor` Protocol works:
 
+<!-- reason: illustrative; class body uses `...` and references undefined Message / Tool -->
+<!--pytest.mark.skip-->
 ```python
 from harness.speculate import Predictor
 from harness.tools.schema import ToolCall
@@ -117,6 +123,8 @@ speculator = Speculator(MyMLPredictor(), max_speculations=2)
 
 ## Combine them
 
+<!-- reason: illustrative; references undefined dispatcher / hooks and needs the [anthropic] extra -->
+<!--pytest.mark.skip-->
 ```python
 runner = AnthropicRunner(
     dispatcher,

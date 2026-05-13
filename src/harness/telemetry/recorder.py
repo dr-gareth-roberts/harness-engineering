@@ -34,7 +34,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
@@ -42,6 +42,30 @@ from harness.telemetry.events import TelemetryEvent
 from harness.telemetry.sinks import NullSink, Sink
 
 logger = logging.getLogger(__name__)
+
+
+Redactor = Callable[[TelemetryEvent], TelemetryEvent]
+"""Pure-data scrubber applied at the `Telemetry.emit` boundary.
+
+A redactor takes a `TelemetryEvent` and returns a (possibly new) event of
+the same type, applied *before* fan-out to any sink. The contract is
+pure-data: callers should return a new instance (typically via
+`event.model_copy(update={...})`) rather than mutating the input — the
+recorder doesn't snapshot the event before handing it off, and a sink
+that retains references (e.g. `MemorySink`) would otherwise observe the
+mutation.
+
+`Telemetry` does *not* catch exceptions raised by the redactor: a bug in
+the scrubber is a configuration error, not a runtime curiosity, and
+silently dropping events on a redactor crash would be worse than a loud
+failure. Wrap your redactor's body in `try/except` if you want soft
+failure modes.
+
+This is a *telemetry-boundary* primitive — sinks are still not
+audit-grade by default. For audit-grade redaction of model I/O across
+the runner boundary, use `harness.privacy.PrivacyBoundary`; that's a
+different boundary with stronger guarantees.
+"""
 
 
 _current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -61,14 +85,28 @@ _current_parent_span_id: contextvars.ContextVar[str | None] = contextvars.Contex
 class Telemetry:
     """Central recorder. Wraps a single `Sink` and isolates failures.
 
-    The recorder never raises — sink errors are logged at WARNING and
-    swallowed so a misbehaving sink can never crash an orchestrator
-    turn or a tool dispatch. Pair with `MultiSink` to fan out to
-    multiple backends.
+    The recorder never raises on sink failure — sink errors are logged
+    at WARNING and swallowed so a misbehaving sink can never crash an
+    orchestrator turn or a tool dispatch. Pair with `MultiSink` to fan
+    out to multiple backends.
+
+    Pass `redactor=` to scrub events at the telemetry boundary before
+    they reach any sink. The redactor runs *after* correlation IDs are
+    threaded in (so the redactor sees the populated event) and *before*
+    `self._sink.emit(...)` (so every sink in a `MultiSink` sees the same
+    redacted view). See the `Redactor` type alias for the contract;
+    sinks are not audit-grade by default — for runner-boundary
+    redaction, use `harness.privacy.PrivacyBoundary`.
     """
 
-    def __init__(self, sink: Sink | None = None) -> None:
+    def __init__(
+        self,
+        sink: Sink | None = None,
+        *,
+        redactor: Redactor | None = None,
+    ) -> None:
         self._sink: Sink = sink if sink is not None else NullSink()
+        self._redactor: Redactor | None = redactor
 
     async def emit(self, event: TelemetryEvent) -> None:
         # Pick up correlation IDs from the current context if the
@@ -87,6 +125,14 @@ class Telemetry:
             ctx_parent = _current_parent_span_id.get()
             if ctx_parent is not None:
                 event.parent_span_id = ctx_parent
+
+        # Apply the boundary redactor (if any) *before* fan-out so every
+        # sink — JSONL, OTel, MultiSink fan-out — sees the same scrubbed
+        # event. A redactor crash is not caught here: a buggy scrubber
+        # is a configuration error and silently dropping events would be
+        # worse than a loud failure.
+        if self._redactor is not None:
+            event = self._redactor(event)
 
         try:
             await self._sink.emit(event)

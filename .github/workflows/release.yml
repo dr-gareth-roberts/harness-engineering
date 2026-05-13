@@ -7,7 +7,7 @@ name: Release
 #
 # One-time setup on PyPI's side: at
 # https://pypi.org/manage/account/publishing/, configure a trusted
-# publisher for `harness-engineering` with:
+# publisher for `harness-engineering-toolkit` with:
 #   - owner: dr-gareth-roberts
 #   - repository: harness-engineering
 #   - workflow: release.yml
@@ -25,45 +25,17 @@ on:
 permissions:
   contents: read
 
-# See ci.yml — without this, `uv run` re-syncs and drops the
-# previously-installed extras (ruff / mypy / pytest / mkdocs all
-# vanish between steps, and the gate fails before the build can
-# happen). `UV_PYTHON` pins which Python `uv run` uses so it doesn't
-# fall back to `.python-version` (3.11) and recreate the venv.
-env:
-  UV_NO_SYNC: "1"
-  UV_PYTHON: "3.12"
-
 jobs:
+  # Re-run the same gate CI runs (lint, type, test, codeblocks, mkdocs,
+  # build) plus the base-install smoke against the tagged commit. Don't
+  # ship a release that wouldn't have passed CI — even if the tagged
+  # commit is on `main`, a stale CI run is not the same as a fresh gate
+  # against the exact ref we're publishing. Pinned to 3.12 for release
+  # builds; the matrix across 3.11 / 3.12 / 3.13 lives in `ci.yml`.
   gate:
-    # Re-run the same gate CI runs, against the tagged commit. Don't
-    # ship a release that wouldn't have passed CI — even if the tagged
-    # commit is on `main`, a stale CI run is not the same as a fresh
-    # gate against the exact ref we're publishing.
-    name: gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with:
-          version: "0.5.x"
-          enable-cache: true
-      - run: uv python install 3.12
-      - name: Sync dependencies
-        run: |
-          uv sync \
-            --python 3.12 \
-            --extra dev \
-            --extra anthropic \
-            --extra openai-compat \
-            --extra otel \
-            --extra fuzz \
-            --extra docs
-      - run: uv run ruff check src tests examples
-      - run: uv run ruff format --check src tests examples
-      - run: uv run mypy --strict src tests
-      - run: uv run pytest -q --cov=harness
-      - run: uv run mkdocs build --strict
+    uses: ./.github/workflows/_gate.yml
+    with:
+      python-version: "3.12"
 
   build-and-publish:
     name: build + publish to PyPI
@@ -75,12 +47,13 @@ jobs:
     # (e.g., manual approval for production tags).
     environment:
       name: pypi
-      url: https://pypi.org/p/harness-engineering
+      url: https://pypi.org/p/harness-engineering-toolkit
     permissions:
       # Once a job specifies any permission, all other permissions reset
-      # to `none` — the workflow-level `contents: read` default no longer
-      # applies. Without `contents: read` here, `actions/checkout@v4`
-      # fails with "Repository not found" before OIDC ever gets to run.
+      # to `none` — the workflow-level `contents: read` default no
+      # longer applies. Without `contents: read` here,
+      # `actions/checkout@v4` fails with "Repository not found" before
+      # OIDC ever gets to run.
       contents: read
       id-token: write
     steps:

@@ -19,6 +19,9 @@ from harness.cache import (
 from harness.contracts import (
     Contract,
     ContractViolation,
+    Never,
+    RoleIs,
+    TextMatches,
     Violation,
     attach_contracts,
     check,
@@ -45,7 +48,7 @@ from harness.hooks import (
     SessionStart,
     Stop,
 )
-from harness.memory import FileStore, InMemoryStore, Session, SessionRecord
+from harness.memory import FileStore, InMemoryStore, PromptBlocked, Session, SessionRecord
 from harness.plan import (
     Plan,
     PlanGuardedRunner,
@@ -53,14 +56,23 @@ from harness.plan import (
     PlanViolation,
     infer_plan_from_records,
 )
-from harness.policy import AllowList, DenyList
+from harness.policy import (
+    AllowList,
+    ArgumentMatcher,
+    DenyList,
+    Policy,
+    attach_pre_tool_policies,
+)
 from harness.privacy import (
+    HIPAA_PACK,
     PII_PACK,
     SECRET_PACK,
     EntropyDetector,
+    PresidioDetector,
     PrivacyBoundary,
     PrivacyViolation,
     RegexDetector,
+    build_pii_pack,
 )
 from harness.prompts import (
     Message,
@@ -102,7 +114,8 @@ from harness.streaming import (
     ToolUseEnd,
     ToolUseStart,
 )
-from harness.telemetry import JSONLSink, MemorySink, MultiSink, Telemetry
+from harness.telemetry import JSONLSink, MemorySink, MultiSink, NullSink, Sink, Telemetry
+from harness.telemetry.events import TelemetryEvent
 from harness.tools import Dispatcher, Tool
 
 if TYPE_CHECKING:
@@ -110,11 +123,12 @@ if TYPE_CHECKING:
     from harness.runner.openai_compat import OpenAICompatRunner
     from harness.telemetry.otel import OpenTelemetrySink
 
-__version__ = "1.0.2"
+__version__ = "1.3.0"
 
 __all__ = [
     "AllowList",
     "AnthropicRunner",
+    "ArgumentMatcher",
     "AttributionChunk",
     "AttributionResult",
     "CannedRunner",
@@ -140,6 +154,7 @@ __all__ = [
     "FileFingerprintStore",
     "FileStore",
     "FuzzReport",
+    "HIPAA_PACK",
     "HookDecision",
     "HookRunner",
     "InMemoryStore",
@@ -153,6 +168,8 @@ __all__ = [
     "MessageEnd",
     "MultiSink",
     "Mutation",
+    "Never",
+    "NullSink",
     "OpenAICompatRunner",
     "OpenTelemetrySink",
     "Orchestrator",
@@ -164,31 +181,38 @@ __all__ = [
     "PlanGuardedRunner",
     "PlanViolation",
     "PlannedToolCall",
+    "Policy",
     "PostAssistantMessage",
     "PostToolUse",
     "PreToolUse",
     "PrefixWatcher",
+    "PresidioDetector",
     "PrivacyBoundary",
     "PrivacyViolation",
+    "PromptBlocked",
     "PromptSubmit",
     "Refusal",
     "RegexDetector",
     "ReplaceToolResult",
     "ReplayRunner",
     "RewriteTurn",
+    "RoleIs",
     "SECRET_PACK",
     "SequencePredictor",
     "Session",
     "SessionEnd",
     "SessionRecord",
     "SessionStart",
+    "Sink",
     "Speculator",
     "Stop",
     "StreamEvent",
     "StreamingRunner",
     "SubAgent",
     "Telemetry",
+    "TelemetryEvent",
     "TextDelta",
+    "TextMatches",
     "Tool",
     "ToolUseEnd",
     "ToolUseStart",
@@ -198,7 +222,9 @@ __all__ = [
     "attach_contracts",
     "attach_file",
     "attach_image",
+    "attach_pre_tool_policies",
     "attribute",
+    "build_pii_pack",
     "check",
     "compact",
     "compare_sessions",

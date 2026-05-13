@@ -27,6 +27,9 @@ The contract:
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import re
 from dataclasses import dataclass, field
 
@@ -38,7 +41,7 @@ from harness.attribute.cache import (
 )
 from harness.attribute.similarity import JaccardSimilarity, Similarity
 from harness.memory.record import SessionRecord
-from harness.prompts.messages import ContentBlock, Message
+from harness.prompts.messages import ContentBlock, ImageRef, Message
 
 Granularity = str  # one of: "message", "block", "sentence"
 
@@ -100,9 +103,13 @@ def _extract_text(message: Message) -> str:
     """Concatenate all text-block content in a message.
 
     Tool-use / tool-result blocks are rendered through their stored text
-    fallback when present, otherwise an empty string. The goal is a string
-    that's good enough for token-overlap or embedding similarity, not a
-    full faithful rendering.
+    fallback when present, otherwise an empty string. Image and file blocks
+    render to stable single-token sentinels (`[image:sha256:...]`,
+    `[file_id:...]`) so similarity functions can register their presence
+    versus absence — otherwise an ablation pass that targets an image block
+    would never see a change in token overlap. The goal is a string that's
+    good enough for token-overlap or embedding similarity, not a full
+    faithful rendering.
     """
     parts: list[str] = []
     for block in message.content:
@@ -116,6 +123,10 @@ def _extract_text(message: Message) -> str:
                 parts.append(content)
             else:
                 parts.append(str(content))
+        elif block.type == "image":
+            parts.append(_image_sentinel(block.image))
+        elif block.type == "file":
+            parts.append(_file_sentinel(block))
     return "\n".join(parts)
 
 
@@ -223,7 +234,43 @@ def _block_text(block: ContentBlock) -> str:
     if block.type == "tool_result" and block.tool_result is not None:
         content = block.tool_result.content
         return content if isinstance(content, str) else str(content)
+    if block.type == "image":
+        return _image_sentinel(block.image)
+    if block.type == "file":
+        return _file_sentinel(block)
     return ""
+
+
+def _image_sentinel(image: ImageRef | None) -> str:
+    """A stable, single-token marker for an image block.
+
+    Different images produce different markers — `image=None` produces a
+    distinct sentinel from a populated one, and two distinct payloads
+    produce distinct markers via SHA-256. URL-sourced images use the URL
+    directly. The marker has no whitespace so token-overlap similarity
+    treats it as one unit.
+    """
+    if image is None:
+        return "[image:none]"
+    if image.source == "base64":
+        try:
+            decoded = base64.b64decode(image.data, validate=True)
+        except (binascii.Error, ValueError):
+            digest = hashlib.sha256(image.data.encode("utf-8")).hexdigest()
+            return f"[image:base64-raw:{image.media_type}:{digest}]"
+        digest = hashlib.sha256(decoded).hexdigest()
+        return f"[image:base64:{image.media_type}:{digest}]"
+    return f"[image:url:{image.media_type}:{image.data}]"
+
+
+def _file_sentinel(block: ContentBlock) -> str:
+    """A stable, single-token marker for a file block.
+
+    Combines `file_id`, `path`, and any inline `text` so an ablation that
+    drops a file block changes the prefix's token set rather than leaving
+    it identical to the original.
+    """
+    return f"[file:{block.file_id}:{block.path}:{block.text}]"
 
 
 def _ablate_messages(

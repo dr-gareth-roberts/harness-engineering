@@ -25,6 +25,8 @@ only fires for `Tool.idempotent=True` by default.
 
 ## Quick example
 
+<!-- reason: illustrative; AnthropicRunner needs the [anthropic] extra and references undefined dispatcher / hooks -->
+<!--pytest.mark.skip-->
 ```python
 from harness import AnthropicRunner, LastCallPredictor, Speculator
 

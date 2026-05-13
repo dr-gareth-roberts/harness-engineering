@@ -26,6 +26,8 @@ follow-up.
 
 ## Quick example
 
+<!-- reason: illustrative; references undefined orchestrator / agent / messages -->
+<!--pytest.mark.skip-->
 ```python
 import asyncio
 from harness import Orchestrator, MessageEnd, TextDelta, ToolUseEnd, ToolUseStart

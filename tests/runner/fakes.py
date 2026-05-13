@@ -84,9 +84,17 @@ class FakeMessage:
 
 
 class _FakeStream:
-    def __init__(self, response: FakeMessage, *, enter_delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        response: FakeMessage,
+        *,
+        enter_delay: float = 0.0,
+        exit_delay: float = 0.0,
+    ) -> None:
         self._response = response
         self._enter_delay = enter_delay
+        self._exit_delay = exit_delay
+        self._event_iter: AsyncIterator[Any] | None = None
 
     async def __aenter__(self) -> _FakeStream:
         if self._enter_delay > 0:
@@ -101,42 +109,87 @@ class _FakeStream:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        if self._exit_delay > 0:
+            import asyncio
+
+            await asyncio.sleep(self._exit_delay)
         return None
 
-    async def __aiter__(self) -> AsyncIterator[Any]:
+    def __aiter__(self) -> _FakeStream:
+        # Return self so callers (including `_TimeoutStream` which calls
+        # `__anext__` directly on the inner stream) can drive iteration.
+        # The real SDK stream behaves this way — `__aiter__` returns the
+        # accumulator object itself, not a fresh async generator.
+        self._ensure_iter()
+        return self
+
+    async def __anext__(self) -> Any:
+        self._ensure_iter()
+        assert self._event_iter is not None  # set by _ensure_iter
+        return await self._event_iter.__anext__()
+
+    def _ensure_iter(self) -> None:
+        if self._event_iter is not None:
+            return
         events = self._response.events
         if events is None:
             events = [
                 FakeContentBlockStopEvent(index=i, content_block=block)
                 for i, block in enumerate(self._response.content)
             ]
-        for event in events:
-            yield event
+
+        async def _gen() -> AsyncIterator[Any]:
+            for event in events:
+                yield event
+
+        self._event_iter = _gen()
 
     async def get_final_message(self) -> FakeMessage:
         return self._response
 
 
 class FakeMessages:
-    def __init__(self, responses: list[FakeMessage], *, enter_delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        responses: list[FakeMessage],
+        *,
+        enter_delay: float = 0.0,
+        exit_delay: float = 0.0,
+    ) -> None:
         self._responses = list(responses)
         self._enter_delay = enter_delay
+        self._exit_delay = exit_delay
         self.requests: list[dict[str, Any]] = []
 
     def stream(self, **kwargs: Any) -> _FakeStream:
         if not self._responses:
             raise RuntimeError("FakeMessages: no canned responses left for stream() call")
         self.requests.append(kwargs)
-        return _FakeStream(self._responses.pop(0), enter_delay=self._enter_delay)
+        return _FakeStream(
+            self._responses.pop(0),
+            enter_delay=self._enter_delay,
+            exit_delay=self._exit_delay,
+        )
 
 
 class FakeAsyncAnthropic:
     """Stand-in for `anthropic.AsyncAnthropic` with a scriptable `messages.stream`.
 
     `enter_delay` lets tests inject a sleep into `messages.stream(...)`'s
-    `__aenter__` to drive timeout-related behavior. Default 0 = no sleep,
-    matches the prior tests.
+    `__aenter__` to drive enter-time timeout behavior. `exit_delay` does
+    the same for `__aexit__` so tests can pin teardown-timeout paths.
+    Both default to 0 = no sleep, matching the prior tests.
     """
 
-    def __init__(self, responses: list[FakeMessage], *, enter_delay: float = 0.0) -> None:
-        self.messages = FakeMessages(responses, enter_delay=enter_delay)
+    def __init__(
+        self,
+        responses: list[FakeMessage],
+        *,
+        enter_delay: float = 0.0,
+        exit_delay: float = 0.0,
+    ) -> None:
+        self.messages = FakeMessages(
+            responses,
+            enter_delay=enter_delay,
+            exit_delay=exit_delay,
+        )

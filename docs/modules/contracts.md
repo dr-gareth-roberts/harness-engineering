@@ -18,6 +18,8 @@ offline and vice versa.
 
 ## Quick example
 
+<!-- reason: illustrative; references undefined HookRunner / record at the offline-check step -->
+<!--pytest.mark.skip-->
 ```python
 from harness.contracts import (
     Always, Earlier, Eventually, HasToolUse, Never,

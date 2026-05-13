@@ -28,10 +28,14 @@ turn-span as `parent_span_id`. You can group / filter on
 
 Install:
 
+<!-- reason: shell example, not executed in the codeblock gate -->
+<!--pytest.mark.skip-->
 ```bash
 uv add 'harness-engineering-toolkit[otel]'
 ```
 
+<!-- reason: illustrative; needs the [otel] + [anthropic] extras and uses `await` at module scope -->
+<!--pytest.mark.skip-->
 ```python
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -95,6 +99,8 @@ AND harness.duration_ms > 200`.
 Often you want OTel for live observability *and* a JSONL file for
 post-hoc analysis or audit. `MultiSink` fans out:
 
+<!-- reason: illustrative; constructing OpenTelemetrySink requires the [otel] extra -->
+<!--pytest.mark.skip-->
 ```python
 from harness import JSONLSink, MultiSink, OpenTelemetrySink, Telemetry
 
@@ -114,6 +120,8 @@ a misbehaving sink can't crash the orchestrator turn.
 Even without `[otel]` installed, the correlation IDs ride on every
 event:
 
+<!-- reason: illustrative; references undefined orchestrator / agent / messages and uses `await` at module scope -->
+<!--pytest.mark.skip-->
 ```python
 from harness import MemorySink, Telemetry
 
@@ -134,6 +142,8 @@ print(f"{len(related)} events under trace {trace_id}")
 
 If your upstream service passes a request-trace ID, propagate it:
 
+<!-- reason: illustrative; `async with` at module scope and references undefined names -->
+<!--pytest.mark.skip-->
 ```python
 async with telemetry.session_scope(trace_id=request.headers["x-trace-id"]):
     await orchestrator.run(agent, messages)
@@ -144,20 +154,36 @@ The orchestrator's auto-opened scope respects the ambient
 
 ## Gotchas
 
-- **`OpenTelemetrySink` doesn't synthesize spans.** It emits events
-  on whatever span is currently active in OTel's context. Wrap your
-  call in a real span (FastAPI/httpx/etc.) so the events have a
-  parent. When no instrumented caller is active, `add_event` is a
-  no-op on OTel's `NonRecordingSpan` — silent loss, by design.
-  Full span-tree synthesis (one OTel span per harness event) was
-  considered but is non-trivial without a custom OTel `IdGenerator`;
-  see [`docs/waves/wave-11.md`](https://github.com/dr-gareth-roberts/harness-engineering/blob/main/docs/waves/wave-11.md).
+- **`OpenTelemetrySink` synthesizes one span per event.** Each
+  `TelemetryEvent` becomes an OTel span whose name is `event.kind`,
+  whose attributes are the harness-prefixed payload fields, and
+  whose parent `SpanContext` is seeded from the recorder's
+  `trace_id` / `span_id` — so harness events land in the same OTel
+  trace as any upstream instrumentation. Events carrying
+  `duration_ms` (e.g. `ToolDispatched`, `OrchestratorTurn`) get a
+  realistic `end_time` rather than a zero-width span. When
+  `event.trace_id` is absent (events emitted outside a
+  `session_scope`), the sink falls back to whatever OTel context is
+  ambient — graceful degradation matching the pre-1.2.0 "ride on
+  the current span" behavior.
 - **Concurrent dispatches keep distinct span_ids.** `asyncio.create_task`
   copies `contextvars`, so `asyncio.gather` over parallel
   `Dispatcher.dispatch` calls each get their own span. No collision.
 - **Sink protocol is just `async emit(event) -> None`.** Anything
   satisfying that signature works; you don't need to inherit from a
   base class.
+
+### Migration from pre-1.2.0
+
+Before M3.5, `OpenTelemetrySink` emitted each event as a flat OTel
+`Event` on the currently active span and silently no-op'd onto
+`NonRecordingSpan` when no instrumented caller was wrapping the
+harness call. 1.2.0 replaces that with the synthesized-span
+contract above: callers who used to rely on `add_event` semantics
+should now see real spans in their backend without any wrapping
+required. Backends that grouped events by `harness.trace_id`
+attribute continue to work — the attribute is still set on every
+span alongside the structurally-seeded SpanContext.
 
 ## Related
 

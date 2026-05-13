@@ -17,6 +17,8 @@ construction patterns.
 
 ## Quick example
 
+<!-- reason: illustrative; references non-existent notes.txt / screenshot.png on disk -->
+<!--pytest.mark.skip-->
 ```python
 from harness import Message, attach_file, attach_image, compact, text
 

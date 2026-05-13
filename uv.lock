@@ -599,8 +599,8 @@ wheels = [
 ]
 
 [[package]]
-name = "harness-engineering"
-version = "1.0.0"
+name = "harness-engineering-toolkit"
+version = "1.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },

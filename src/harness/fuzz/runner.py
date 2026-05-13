@@ -130,7 +130,7 @@ async def fuzz_tool(
     * produced a ``ToolResult`` with ``is_error=True``.
     """
 
-    tool = dispatcher._tools.get(tool_name)
+    tool = dispatcher.tools.get(tool_name)
     if tool is None:
         raise KeyError(f"tool {tool_name!r} is not registered on the dispatcher")
 
@@ -172,7 +172,7 @@ async def fuzz_agent(
     ``model_dump`` dict, which keeps tests self-contained.
     """
 
-    tool = orchestrator.dispatcher._tools.get(tool_name)
+    tool = orchestrator.dispatcher.tools.get(tool_name)
     if tool is None:
         raise KeyError(f"tool {tool_name!r} is not registered on the dispatcher")
 

@@ -86,7 +86,12 @@ async def test_rewrite_user_turn_keeps_prefix_and_uses_runner_for_tail() -> None
 
 
 # ---------------------------------------------------------------------------
-# 2. Insert a user turn — message count increases by ≥2 (insert + reply).
+# 2. Insert a user turn — truncate-then-append semantics (see InsertTurn docstring).
+#
+# Despite the name, `InsertTurn` does NOT preserve the original tail: it
+# truncates at `after + 1` and appends the new message, then the runner
+# produces a fresh continuation. The original test name is retained for
+# backwards compatibility; the assertions below codify the real semantics.
 
 
 async def test_insert_user_turn_grows_history_by_two_at_minimum() -> None:
@@ -108,6 +113,70 @@ async def test_insert_user_turn_grows_history_by_two_at_minimum() -> None:
     # Prefix (turns 0..1) + insert + continuation = 4 messages, original had 6.
     # The "≥2 more than the prefix" property holds: 4 ≥ 2 + 2.
     assert len(result.messages) >= len(original.messages[:2]) + 2
+
+
+async def test_insert_turn_truncates_tail_does_not_preserve_subsequent_turns() -> None:
+    """Explicitly pin the truncate-then-append behaviour of `InsertTurn`.
+
+    The original session has 6 messages; an `InsertTurn(after=1, ...)`
+    must yield exactly 4 messages (prefix[0:2] + inserted + continuation).
+    Subsequent turns from the original session (indices 2..5) are NOT
+    preserved — verifying that the implementation does not splice. See
+    the `InsertTurn` class docstring and roadmap item M2.8.
+    """
+    original = _record_with_history()
+    runner = CannedRunner(["got it"])
+    inserted_text = "wait, one more thing"
+
+    result = await counterfactual(
+        session=original,
+        mutation=InsertTurn(after=1, new_message=text("user", inserted_text)),
+        runner=runner,
+        orchestrator=_make_orch(runner),
+    )
+
+    # Truncation is total: exactly prefix (2) + inserted (1) + continuation (1).
+    assert len(result.messages) == 4
+    assert len(original.messages) == 6
+
+    # None of the original tail messages (indices 2..5) appear in the result.
+    original_tail_texts = _texts(original)[2:]
+    result_texts = _texts(result)
+    for tail_text in original_tail_texts:
+        if tail_text is None:
+            continue
+        assert tail_text not in result_texts, (
+            f"InsertTurn must truncate the tail, but original turn "
+            f"{tail_text!r} leaked into the counterfactual at index "
+            f"{result_texts.index(tail_text)}"
+        )
+
+    # And the only "new" content past the prefix is the inserted message + runner reply.
+    assert result_texts[2] == inserted_text
+    assert result_texts[3] == "got it"
+
+
+async def test_insert_turn_at_minus_one_truncates_entire_session() -> None:
+    """`InsertTurn(after=-1, ...)` inserts at the very start, dropping all
+    original turns. The result is the inserted message plus one runner
+    continuation — nothing else from the original survives."""
+    original = _record_with_history()
+    runner = CannedRunner(["fresh start"])
+
+    result = await counterfactual(
+        session=original,
+        mutation=InsertTurn(after=-1, new_message=text("user", "new beginning")),
+        runner=runner,
+        orchestrator=_make_orch(runner),
+    )
+
+    assert len(result.messages) == 2
+    assert _texts(result) == ["new beginning", "fresh start"]
+    # No original content survives.
+    for original_text in _texts(original):
+        if original_text is None:
+            continue
+        assert original_text not in _texts(result)
 
 
 # ---------------------------------------------------------------------------

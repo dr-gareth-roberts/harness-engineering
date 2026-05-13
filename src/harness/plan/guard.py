@@ -1,15 +1,16 @@
 """`PlanGuardedRunner` — wraps any `Runner` and enforces a `Plan`.
 
 The guard implements Option 1 from the design: each plan step compiles to
-a one-shot `Always(HasToolUse(...) & ArgMatches(...))` contract, and each
-contract is compiled to a `DFA` lazily as its step becomes active. A
-single tick of the DFA against a synthesized one-block assistant message
-decides pass/fail for that step.
+a one-shot `Always(HasToolUse(...) & ArgMatches(...))` contract, every
+contract is compiled to a `DFA` once at construction, and the DFA is reset
+between ticks. A single tick of the DFA against a synthesized one-block
+assistant message decides pass/fail for that step.
 
-This means the load-bearing call site is `compile_contract(...)` in
-`_compile_step_dfa` — that's where the plan crosses into the contracts
-substrate. The guard never reimplements predicate matching or pattern
-state machines; it composes them.
+The load-bearing call site is `compile_contract(...)` in `__init__` —
+that's where plans cross into the contracts substrate. The guard never
+reimplements predicate matching or pattern state machines; it composes
+them. Hoisting the compile out of the hot path also drops subset-mode
+matching from quadratic to linear in plan size (M3.4).
 """
 
 from __future__ import annotations
@@ -36,9 +37,10 @@ class PlanGuardedRunner:
         await orch.run(executor_agent, messages)
         guarded.finalize()  # raises PlanViolation if plan is unfinished
 
-    The guard ticks one DFA per plan step. A fresh DFA is compiled the
-    first time each step becomes active (DFAs are stateful, so we don't
-    reuse them across runs).
+    The guard ticks one DFA per plan step. DFAs are compiled once in
+    `__init__` and reset between ticks; reset is mandatory because
+    `_AlwaysPredicateState` latches `violated=True` on the first miss
+    and would silently pass subsequent calls without it.
 
     State persists across multiple `__call__` invocations: a multi-turn
     orchestrator session shares one step pointer, so a plan can describe
@@ -48,9 +50,20 @@ class PlanGuardedRunner:
     def __init__(self, real_runner: Runner, plan: Plan) -> None:
         self._real_runner = real_runner
         self._plan = plan
-        # Compile contracts up-front (cheap; pure data). DFAs are compiled
-        # lazily per active step in `_compile_step_dfa`.
+        # Compile contracts up-front (cheap; pure data). DFAs are also
+        # compiled up-front, once per step, and reset between ticks: each
+        # `_step_accepts` call must see a fresh-state DFA, but paying the
+        # `compile_contract` cost per call is what made the original
+        # `_consume_subset` quadratic in plan size.
         self._contracts = plan.to_contracts()
+        self._step_dfas: list[DFA] = [compile_contract(c) for c in self._contracts]
+        # Index step positions by tool name so subset matching can skip
+        # straight to candidates whose `HasToolUse(name=...)` could plausibly
+        # match. `PlannedToolCall.tool_name` is required, so every step has
+        # exactly one entry.
+        self._indices_by_tool: dict[str, list[int]] = {}
+        for i, step in enumerate(plan.steps):
+            self._indices_by_tool.setdefault(step.tool_name, []).append(i)
         self._step_index = 0
         self._finalized = False
 
@@ -131,13 +144,17 @@ class PlanGuardedRunner:
                 step_index=len(steps),
             )
 
+        # Synthesize the per-call message once; every candidate step ticks
+        # against the same content.
+        message = _synthesize_tool_use_message(tool_use)
+
         if mode == "subset":
-            self._consume_subset(tool_use)
+            self._consume_subset(tool_use, message)
             return
 
         # strict / superset: try to match the current step.
         active_step = steps[self._step_index]
-        if self._step_accepts(self._step_index, tool_use):
+        if self._step_accepts(self._step_index, message):
             self._step_index += 1
             return
 
@@ -152,17 +169,26 @@ class PlanGuardedRunner:
             step_index=self._step_index,
         )
 
-    def _consume_subset(self, tool_use: ToolCall) -> None:
+    def _consume_subset(self, tool_use: ToolCall, message: Message) -> None:
         """Subset matching: skip past steps that don't match the call.
 
-        Scan `plan.steps[step_index:]` for the first step that accepts the
-        call. Found at offset `k` → advance pointer past it. Not found →
-        wrong-tool violation referencing the current step.
+        Use the tool-name index to walk only steps whose planned tool name
+        equals the observed call's name — every other step's predicate is
+        `HasToolUse(name=X) & ...`, which can't match a different tool. This
+        drops the inner loop from O(remaining_steps) to O(matching_steps),
+        and combined with precompiled DFAs (no per-tick `compile_contract`)
+        the total work per call is O(matching_steps) ticks.
+
+        Found at the earliest absolute index ≥ `_step_index` → advance
+        pointer past it. Not found → wrong-tool violation referencing the
+        current step.
         """
         steps = self._plan.steps
-        for offset in range(len(steps) - self._step_index):
-            absolute_index = self._step_index + offset
-            if self._step_accepts(absolute_index, tool_use):
+        candidates = self._indices_by_tool.get(tool_use.name, ())
+        for absolute_index in candidates:
+            if absolute_index < self._step_index:
+                continue
+            if self._step_accepts(absolute_index, message):
                 self._step_index = absolute_index + 1
                 return
         # No remaining step matched: the call doesn't fit anywhere in the
@@ -173,27 +199,18 @@ class PlanGuardedRunner:
             step_index=self._step_index,
         )
 
-    def _step_accepts(self, step_index: int, tool_use: ToolCall) -> bool:
-        """True iff the step at `step_index` accepts `tool_use`.
+    def _step_accepts(self, step_index: int, message: Message) -> bool:
+        """True iff the step at `step_index` accepts the synthesized message.
 
-        Compiles a fresh DFA for the step (DFAs are stateful; we use each
-        instance for exactly one decision) and ticks it with a synthesized
-        single-block assistant message.
-
-        This is the load-bearing call site: `compile_contract` is the
-        canonical bridge from `Plan` semantics to the contracts substrate.
+        Reuses the DFA precompiled in `__init__`, resetting its state before
+        each tick. `reset` is mandatory: `_AlwaysPredicateState.tick` latches
+        `_violated=True` on the first miss and would short-circuit subsequent
+        ticks to OK — silently passing the next mismatched step.
         """
-        dfa = self._compile_step_dfa(step_index)
-        message = _synthesize_tool_use_message(tool_use)
+        dfa = self._step_dfas[step_index]
+        dfa.reset()
         violation = dfa.tick(message)
         return violation is None
-
-    def _compile_step_dfa(self, step_index: int) -> DFA:
-        """The single line that ties plans to the contracts DFA.
-
-        See module docstring; this is what the brief asks us to "point at".
-        """
-        return compile_contract(self._contracts[step_index])
 
 
 def _iter_tool_uses(message: Message) -> list[ToolCall]:

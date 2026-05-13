@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -62,10 +63,12 @@ async def safe_subprocess_run(
     `asyncio.create_subprocess_exec`, which spawns the program directly
     with no shell layer. Quoting games and command-injection in `cmd` are
     therefore not a risk. `env` defaults to `scrub_env()` — pass an
-    explicit dict to override. On timeout the child is killed and
-    `SubprocessTimeout` is raised; the kill+wait pattern is tested on
-    POSIX (Linux/macOS); Windows event-loop variants are not exhaustively
-    verified.
+    explicit dict to override. The child is spawned in a fresh process
+    group (POSIX `start_new_session=True`) so the timeout path can signal
+    the whole group via `os.killpg`, reaping any grandchildren the program
+    forked off. On timeout `SubprocessTimeout` is raised; the kill+wait
+    pattern is tested on POSIX (Linux/macOS); Windows event-loop variants
+    are not exhaustively verified.
     """
     actual_env: Mapping[str, str] = env if env is not None else scrub_env()
     actual_cwd = str(cwd) if cwd is not None else None
@@ -78,12 +81,18 @@ async def safe_subprocess_run(
         stdin=asyncio.subprocess.PIPE if stdin is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout)
     except TimeoutError as exc:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
+        # Signal the entire process group so grandchildren spawned via
+        # double-fork / `&` / `nohup` are killed too, not just the direct
+        # child. `getpgid` itself can raise ProcessLookupError if the child
+        # exited between `wait_for` returning and this call; suppress that
+        # and PermissionError for the no-op-on-missing-pgid path.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), timeout=2.0)
         raise SubprocessTimeout(f"subprocess {cmd[0]!r} exceeded timeout of {timeout}s") from exc

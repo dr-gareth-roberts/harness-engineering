@@ -79,6 +79,29 @@ async def test_list_returns_sorted_by_updated_at_desc(store_factory: StoreFactor
     assert [r.session_id for r in listed] == ["s0", "s1", "s2"]
 
 
+async def test_list_recency_contract_under_non_recency_insertion(
+    store_factory: StoreFactory,
+) -> None:
+    """MemoryStore.list contracts recency-descending order regardless of
+    insertion order. Insert oldest-first (i.e. NOT recency order) and assert
+    list() reorders to most-recent-first.
+    """
+    store = await store_factory()
+    now = datetime.now(UTC)
+    # Save deliberately oldest-first so a buggy "insertion order" impl would
+    # produce the opposite of what the contract requires.
+    sessions_by_age = [
+        ("oldest", now - timedelta(hours=10)),
+        ("middle", now - timedelta(hours=5)),
+        ("newest", now),
+    ]
+    for session_id, ts in sessions_by_age:
+        await store.save(make_record(session_id, updated_at=ts))
+
+    listed = await store.list()
+    assert [r.session_id for r in listed] == ["newest", "middle", "oldest"]
+
+
 async def test_list_respects_limit(store_factory: StoreFactory) -> None:
     store = await store_factory()
     for i in range(5):
@@ -150,6 +173,64 @@ async def test_filestore_rejects_unsafe_session_id(tmp_path: Path) -> None:
     for unsafe in ("../etc", "a/b", r"a\b", ".hidden", ""):
         with pytest.raises(ValueError):
             await store.save(make_record(unsafe))
+
+
+@pytest.mark.parametrize(
+    "unsafe_char",
+    [
+        "/",
+        "\\",
+        ":",
+        ";",
+        "\n",
+        "\r",
+        "\x00",
+        # Sample of control chars below 0x20 that aren't already in the
+        # explicit map: bell, backspace, tab, vertical tab, form feed, ESC,
+        # and the boundary char immediately below 0x20.
+        "\x07",
+        "\x08",
+        "\t",
+        "\x0b",
+        "\x0c",
+        "\x1b",
+        "\x1f",
+    ],
+)
+async def test_filestore_rejects_individual_unsafe_chars(tmp_path: Path, unsafe_char: str) -> None:
+    """Each disallowed char must raise the documented 'unsafe session_id'
+    error rather than slipping through to a downstream raw OSError/ValueError
+    from a null-byte path operation or a path-traversal write.
+    """
+    store = FileStore(tmp_path)
+    session_id = f"sess{unsafe_char}id"
+    with pytest.raises(ValueError, match="unsafe session_id"):
+        await store.save(make_record(session_id))
+
+
+async def test_filestore_unsafe_session_id_error_names_offending_char(
+    tmp_path: Path,
+) -> None:
+    """The error message must surface the offending character so operators
+    can see which class of char tripped the validator."""
+    store = FileStore(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        await store.save(make_record("a:b"))
+    msg = str(excinfo.value)
+    assert "unsafe session_id" in msg
+    assert "':'" in msg  # repr of the offending char
+
+
+async def test_filestore_accepts_safe_session_id_chars(tmp_path: Path) -> None:
+    """Safe chars (letters, digits, dashes, underscores, dots-not-leading)
+    must still round-trip — guarding against an over-eager validator."""
+    store = FileStore(tmp_path)
+    safe_ids = ("abc", "a-b", "a_b", "a.b", "ABC123", "session-2026-05-13")
+    for sid in safe_ids:
+        await store.save(make_record(sid))
+        loaded = await store.load(sid)
+        assert loaded is not None
+        assert loaded.session_id == sid
 
 
 async def test_filestore_ignores_stray_tmp_files(tmp_path: Path) -> None:

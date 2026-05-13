@@ -17,6 +17,8 @@ plan from past successful trajectories.
 
 ## Quick example
 
+<!-- reason: illustrative; needs the [anthropic] extra and references undefined records / dispatcher / hooks -->
+<!--pytest.mark.skip-->
 ```python
 from harness import (
     Plan, PlannedToolCall, PlanGuardedRunner, AnthropicRunner,

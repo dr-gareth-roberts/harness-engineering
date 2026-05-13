@@ -22,6 +22,8 @@ resulting assistant message.
 
 Install the extra:
 
+<!-- reason: shell example, not executed in the codeblock gate -->
+<!--pytest.mark.skip-->
 ```bash
 uv add 'harness-engineering-toolkit[fuzz]'
 ```
@@ -81,6 +83,8 @@ For checking properties of *the assistant's response* given fuzzed
 inputs, give `fuzz_agent` the tool whose `input_model` to fuzz and
 an invariant over the assistant `Message`:
 
+<!-- reason: illustrative; references undefined orchestrator / agent and uses `await` at module scope -->
+<!--pytest.mark.skip-->
 ```python
 from harness.fuzz import fuzz_agent
 from harness.prompts.messages import Message
@@ -110,6 +114,8 @@ default; pass `prompt_template=lambda example: ...` to customise.
 Use the `harness_property` decorator for property-based tests. It
 takes the dispatcher and the tool *name* (not the input model):
 
+<!-- reason: illustrative; references undefined dispatcher and decorates at module scope -->
+<!--pytest.mark.skip-->
 ```python
 from harness.fuzz import harness_property
 from harness.tools.schema import ToolCall

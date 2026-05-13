@@ -18,6 +18,8 @@ path and get either a real `Path` back or a typed error.
 
 ## Quick example
 
+<!-- reason: illustrative; uses `await` at module scope and runs a real subprocess against ./workspace -->
+<!--pytest.mark.skip-->
 ```python
 from harness import (
     HookRunner, PathPolicy, PathScope, PreToolUse,

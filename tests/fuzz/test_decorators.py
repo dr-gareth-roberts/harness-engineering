@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Awaitable, Callable
 
 import pytest
 from pydantic import BaseModel
@@ -65,6 +66,54 @@ async def test_decorator_surfaces_assertion_errors() -> None:
 
     with pytest.raises(AssertionError, match="intentional"):
         await always_fails()
+
+
+async def test_decorator_same_seed_yields_same_first_failure() -> None:
+    """``harness_property`` is a deterministic enumerator, not a shrinker.
+
+    Same ``seed`` → same payload sequence → same first failing payload.
+    This pins the documented contract: the decorator reports the first
+    failure directly (no Hypothesis shrinking), so the failing payload
+    captured here must be stable across runs with the same seed.
+    """
+
+    dispatcher = Dispatcher(
+        [
+            Tool(
+                name="echo",
+                description="Echo.",
+                input_model=_StringIn,
+                handler=_identity,
+            )
+        ]
+    )
+
+    def _make_run() -> tuple[Callable[[], Awaitable[None]], list[_StringIn]]:
+        captured: list[_StringIn] = []
+
+        @harness_property(dispatcher=dispatcher, tool="echo", n=50, seed=1234)
+        async def fails_on_third(payload: _StringIn) -> None:
+            captured.append(payload)
+            if len(captured) >= 3:
+                msg = "deliberate failure on third payload"
+                raise AssertionError(msg)
+
+        return fails_on_third, captured
+
+    first_run, first_captured = _make_run()
+    with pytest.raises(AssertionError, match="deliberate failure"):
+        await first_run()
+
+    second_run, second_captured = _make_run()
+    with pytest.raises(AssertionError, match="deliberate failure"):
+        await second_run()
+
+    assert len(first_captured) == 3
+    assert len(second_captured) == 3
+    # Full-sequence equality is the strongest claim and the easiest to read.
+    assert first_captured == second_captured
+    # And the first failing payload is identical — the documented contract.
+    assert first_captured[-1] == second_captured[-1]
 
 
 async def test_decorator_unknown_tool_raises_keyerror() -> None:

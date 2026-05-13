@@ -18,6 +18,8 @@ and `CannedRunner` ship in the base install (no API key needed);
 
 ## Quick example
 
+<!-- reason: illustrative; references undefined dispatcher / hooks and needs [anthropic] / [openai-compat] extras -->
+<!--pytest.mark.skip-->
 ```python
 from harness import AnthropicRunner, OpenAICompatRunner, EchoRunner
 
@@ -39,6 +41,8 @@ runner = OpenAICompatRunner(
 
 The vendor runners share kwargs you can plug optionally:
 
+<!-- reason: illustrative; placeholder `...` args and undefined Speculator / PrefixWatcher constructors -->
+<!--pytest.mark.skip-->
 ```python
 AnthropicRunner(
     dispatcher, hooks,

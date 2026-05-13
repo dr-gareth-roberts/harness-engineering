@@ -17,6 +17,8 @@ CLI subcommand.
 
 ## Quick example
 
+<!-- reason: illustrative; references undefined dispatcher / hooks and needs the [anthropic] extra -->
+<!--pytest.mark.skip-->
 ```python
 from harness import (
     AnthropicRunner, FileFingerprintStore, PrefixWatcher,

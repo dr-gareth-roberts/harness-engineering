@@ -227,13 +227,22 @@ timing — eager per-block cancellation when
 
 ### Does `OpenTelemetrySink` create OTel spans?
 
-No. It emits each `TelemetryEvent` as a flat `Event` on whatever
-span is currently active in the OTel context. Wrap your call in a
-real span (FastAPI middleware, instrumented HTTP client, etc.) so
-the events have a parent. When no instrumented caller is active,
-`add_event` is a no-op on OTel's `NonRecordingSpan` — silent loss,
-by design. Synthesizing OTel spans from harness events would
-require a custom `IdGenerator`; tracked as deferred.
+Yes. As of 1.2.0 (M3.5) the sink synthesizes one OTel span per
+`TelemetryEvent` via `tracer.start_as_current_span(...)`. The span
+name is `event.kind` (e.g. `"tool.dispatched"`, `"orchestrator.turn"`),
+the payload fields become `harness.*`-prefixed attributes, and the
+parent `SpanContext` is seeded from the harness recorder's
+`trace_id` / `span_id` so the synthesized span lives in the same
+OTel trace as the harness session. Events carrying `duration_ms`
+get a realistic `end_time` rather than a zero-width span.
+
+Pre-1.2.0 the sink emitted flat OTel `Event`s on whatever span was
+currently active, which silently no-op'd when no instrumented
+caller was wrapping the call (the ambient span was OTel's
+`NonRecordingSpan`). That known limitation is resolved — when
+`trace_id` is absent the sink still falls back to the ambient
+context as graceful degradation, but the common path is a real
+synthesized span.
 
 ### How do I correlate events from one session?
 

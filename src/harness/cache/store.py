@@ -89,7 +89,18 @@ class FileFingerprintStore:
     per-instance `asyncio.Lock` so concurrent appends from the same
     process don't interleave at the bytes-on-disk level.
 
-    Cross-process append safety relies on POSIX `O_APPEND`. Cross-machine
+    **Concurrent / cross-process writes**: this store opens the file in append
+    mode, which gives `O_APPEND` atomicity for writes up to `PIPE_BUF` (512
+    bytes on macOS, 4096 on Linux). Single-process multi-threaded access is
+    safe: an `asyncio.Lock` serializes writes, and `iter_recent` tolerates a
+    half-written final line. Across processes, records smaller than `PIPE_BUF`
+    append atomically; larger records may interleave bytes from concurrent
+    writers and corrupt the affected lines (`iter_recent` skips unparseable
+    JSON, but the data is lost). This is a different profile from
+    :class:`harness.memory.store.FileStore`, which atomically renames whole
+    files and risks lost-update instead. If you need cross-process safety for
+    large records, wrap `append` with an external file-lock (e.g.
+    `fcntl.flock`) or restrict to a single writer per file. Cross-machine
     consistency is out of scope.
     """
 

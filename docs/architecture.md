@@ -76,7 +76,7 @@ enforcement. Each event is a Pydantic model dispatched through
 |---|---|
 | `SessionStart` | `Orchestrator.run` enters |
 | `SessionEnd` | `Orchestrator.run` exits (success or error) |
-| `PromptSubmit` | A user message reaches the orchestrator |
+| `PromptSubmit` | `Session.send` accepts a user message, before the orchestrator runs |
 | `PreToolUse` | Before the dispatcher invokes a tool. Returning a `block` decision short-circuits dispatch. |
 | `PostToolUse` | After dispatch — every tool call (success or error) sees this |
 | `PostAssistantMessage` | After the runner produces an assistant message — observable both in DebugRunner mutations and live model output |

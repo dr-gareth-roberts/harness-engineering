@@ -1,9 +1,12 @@
 # `harness.agents`
 
 `SubAgent` (a model + system prompt + tool allow-list) and the
-`Orchestrator` that drives one through a runner, emitting lifecycle
-hooks (`SessionStart` / `SessionEnd` / `PromptSubmit`) and
-optionally `OrchestratorTurn` telemetry.
+`Orchestrator` that drives one through a runner, emitting
+`SessionStart` / `SessionEnd` lifecycle hooks and optionally
+`OrchestratorTurn` telemetry. `PromptSubmit` is emitted *one layer
+up* by `harness.memory.Session.send` so a registered contract /
+policy sees the user text before the orchestrator (and any runner)
+does — see [`harness.memory`](memory.md) for the emission site.
 
 ## When to reach for this
 
@@ -16,6 +19,8 @@ optionally `OrchestratorTurn` telemetry.
 
 ## Quick example
 
+<!-- reason: illustrative; AnthropicRunner needs the [anthropic] extra and uses placeholder `[...]` / `...` args -->
+<!--pytest.mark.skip-->
 ```python
 import asyncio
 from harness import (
@@ -54,6 +59,11 @@ async def stream():
   configured runner doesn't.
 - **`SessionStart` / `SessionEnd` fire even on exception** — they
   bracket the run via `try / finally`.
+- **`PromptSubmit` is emitted by `Session.send`, not `Orchestrator.run`.**
+  If you're driving the orchestrator directly (no `Session` wrapping
+  it), no `PromptSubmit` fires — you emit one yourself via
+  `hooks.emit(PromptSubmit(prompt=...))` before calling `run`, or use
+  `Session` for the documented surface.
 
 ## Related
 

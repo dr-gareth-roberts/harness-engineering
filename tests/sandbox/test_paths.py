@@ -67,6 +67,27 @@ def test_validate_raises_path_denied(tmp_path: Path) -> None:
         scope.validate("/etc/passwd")
 
 
+def test_deny_is_case_sensitive_regardless_of_filesystem(tmp_path: Path) -> None:
+    """Document the case-sensitivity bypass called out in the PathScope docstring.
+
+    `Path.resolve()` does not case-fold. A `deny` prefix of `<tmp>/secret`
+    will NOT block an access to `<tmp>/SECRET/file` — they are distinct
+    strings under containment. On case-insensitive filesystems
+    (macOS-default APFS, Windows NTFS) those refer to the same on-disk
+    object, so this is an advisory gap operators must know about.
+
+    This test pins the current (documented) behavior. A future fix that
+    introduces case-folding must update the docstring and intentionally
+    break this assertion rather than silently flipping semantics.
+    """
+    secret = tmp_path / "secret"
+    scope = PathScope.of(deny=[secret])
+    # Sanity: the lowercase form is denied as expected.
+    assert scope.is_allowed(secret / "file") is False
+    # Bypass: the uppercase variant is treated as a distinct path and passes.
+    assert scope.is_allowed(tmp_path / "SECRET" / "file") is True
+
+
 # ---------------------------------------------------------------------------
 # PathPolicy
 

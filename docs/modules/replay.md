@@ -16,6 +16,8 @@ for cross-provider differential matrices with HTML reports.
 
 ## Quick example
 
+<!-- reason: illustrative; needs session.json on disk -->
+<!--pytest.mark.skip-->
 ```python
 import asyncio
 from pathlib import Path

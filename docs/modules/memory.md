@@ -16,6 +16,8 @@ turn.
 
 ## Quick example
 
+<!-- reason: illustrative; references undefined orchestrator and uses `await` at module scope -->
+<!--pytest.mark.skip-->
 ```python
 from harness import FileStore, Session, SubAgent
 

@@ -15,6 +15,8 @@ the dispatcher with a `ToolResult(is_error=True)`.
 
 ## Quick example
 
+<!-- reason: illustrative; `AllowList.of` is `AllowList(tools=...)` in the live API; see /examples/policy.py -->
+<!--pytest.mark.skip-->
 ```python
 from harness import AllowList, DenyList, HookRunner
 from harness.policy import ArgumentMatcher, attach_pre_tool_policies

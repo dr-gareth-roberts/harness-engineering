@@ -180,6 +180,10 @@ def _run_dap_session(record: SessionRecord) -> int:
     replay = ReplayRunner.from_record(record)
     dispatcher = Dispatcher()
     hooks = HookRunner()
+    # M3.6 — wire the adapter's PreToolUse/PostToolUse listeners so
+    # `stepIn` / `stepOut` get frame-aware semantics instead of
+    # aliasing to step_over.
+    adapter.attach_hooks(hooks)
 
     debug = DebugRunner(
         replay,

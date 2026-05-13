@@ -5,7 +5,201 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
 ## [Unreleased]
+
+## [1.3.0] — 2026-05-13
+
+Production-quality batch driven by a multi-pass audit
+(`audit/RELEASE-TODO.md` for the full punch-list, derived from a
+seven-agent module survey, a single-agent end-to-end walk, and a
+Codex second-opinion review). Collapses the work that previously
+shipped as a cascade of intermediate version bumps (1.0.3 → 1.3.1)
+into one minor release.
+
+No semver-breaking changes on the documented happy path. Two
+kwargs that the implementation silently ignored
+(`OpenTelemetrySink(tracer=)` and `PrivacyBoundary(on_detect=)`) were
+removed in M1; the OTel kwarg was reintroduced later in the same
+release with real span-synthesis behavior, so 1.3.0 ships it
+working.
+
+### Added
+
+- **Public API parity**: 12 names previously documented as
+  importable from `harness` but only reachable via submodules now
+  re-exported at top level — `HIPAA_PACK`, `PresidioDetector`,
+  `build_pii_pack`, `Sink`, `NullSink`, `TelemetryEvent`, `Policy`,
+  `attach_pre_tool_policies`, `ArgumentMatcher`, `Never`, `RoleIs`,
+  `TextMatches`. Plus new exports: `PromptBlocked`, `Redactor`.
+  `tests/test_public_api.py` scans the docs and pins forward-going
+  parity.
+- **`Session.send` emits `PromptSubmit`** through the orchestrator's
+  `HookRunner` before invoking the runner. Closes the
+  documented-but-unwired surface that `attach_contracts` already
+  registered a handler for. A `PromptSubmit` handler returning
+  `HookDecision(block=True)` causes `Session.send` to raise the new
+  `PromptBlocked` exception. New cookbook recipe:
+  `docs/cookbook/prompt-submit-contracts.md`.
+- **`Telemetry(redactor=...)`** kwarg accepts a
+  `Callable[[TelemetryEvent], TelemetryEvent]` applied between
+  correlation-ID threading and sink fan-out. Use to scrub
+  `ToolDispatched.arguments` before sinks see it. Sinks remain
+  best-effort by design; audit-grade scrubbing of model I/O remains
+  `PrivacyBoundary` territory.
+- **`OpenTelemetrySink(tracer=...)`** kwarg now actually works: the
+  sink synthesizes proper OTel spans from the harness correlation
+  IDs. Each `TelemetryEvent` becomes its own span named by
+  `event.kind`, seeded with `trace_id` / `span_id`. Faithful trace
+  continuity; deeper parent linkage preserved as
+  `harness.parent_span_id` attribute.
+- **`DapAdapter.attach_hooks(hook_runner)`** registers
+  `PreToolUse`/`PostToolUse` listeners for frame-aware DAP stepping.
+  `harness debug --dap` wires it automatically.
+- **`JSONLSink` lifecycle**: `async close()`, `__aenter__` /
+  `__aexit__`. Sink now lazily opens the path-backed file on first
+  emit and holds the handle for its lifetime — open+close syscalls
+  drop from `2N` to `2` per `N` events.
+- **`ReplayRunner.from_record(allow_tool_use=...)`** kwarg + WARNING
+  on tool-using records (replay does not re-dispatch tools).
+- **Cross-package integration suite** at `tests/integration/` —
+  10 tests covering orchestrator+runner+hooks+policy,
+  replay+counterfactual+compare, privacy+speculate+cache, DAP
+  end-to-end, and real `AnthropicRunner` / `OpenAICompatRunner`
+  driven through `Orchestrator.run` with SDK boundaries faked.
+- **Behavior-pinning tests for `AnthropicRunner`** at
+  `tests/runner/test_anthropic_pin_parity.py` — 9 tests asserting
+  `__call__` and `run_stream` produce identical results across 8
+  vendor scenarios. Made the tool-loop dedup (below) safe.
+
+### Fixed (correctness)
+
+- `safe_subprocess_run` no longer leaks grandchildren on
+  timeout-kill — `start_new_session=True` + SIGKILL the process
+  group on timeout.
+- DAP server emits `terminated`/`exited` at most once per session
+  (was: duplicate on disconnect).
+- DAP tool-frame breakpoints now report the correct source line
+  (was: `turn_index=0` hard-coded, so stepIn/stepOut pauses inside
+  a tool during turn N still showed line 1).
+- `OpenTelemetrySink.tracer` kwarg honored (see Added).
+- `compare_sessions` / `diff_eval` and `attribute()` now hash image
+  content and `file_id` blocks — multimodal regressions are
+  detectable.
+- `OpenAICompatRunner` filters empty-content assistant rows
+  (vLLM/llama.cpp now accept the payload), surfaces malformed
+  tool-call JSON as visible `is_error` ToolResult instead of silent
+  `{}` fallback, and skips duplicate system-prompt prepending when
+  the caller supplied one.
+- `AnthropicRunner._TimeoutStreamCtx.__aexit__` logs at WARNING and
+  propagates teardown timeouts (was: swallowed silently).
+- `AnthropicRunner` lazy-constructs the SDK client on first use
+  (was: eager at `__init__`).
+- `PrivacyBoundary` audit events no longer echo dict-key path
+  components verbatim; keys run through the detector pipeline
+  before entering `DetectionEvent.location` /
+  `PrivacyViolation.__str__`. Overlapping detection ranges
+  greedy-merged before redaction splice.
+- `PrivacyBoundary` scans image and file metadata: image URL,
+  media_type, file_id, path. Base64 content and file body remain
+  out of scope (documented; OCR pre-pass recipe added).
+- `HookRunner.emit` discipline now formally documented at
+  `docs/contracts/user-code-execution.md` — exception handling
+  across HookRunner / Dispatcher / MultiSink / Speculator pinned
+  with rationale per surface.
+- `DriftEvent.before_ts` backfilled from the same record as
+  `before_prompt` (not the intermediate identical record).
+- `derive_plan(plan_schema=...)` now injects the resolved JSON
+  schema into the planner prompt as documented (was:
+  computed-then-discarded).
+- `ReplayRunner.from_record` warns loudly for tool-using records
+  (replay does not re-dispatch tools; see Added kwarg).
+- `harness_property` docstring rewritten — deterministic input
+  enumeration, not Hypothesis property-test semantics.
+- `harness.contracts.runtime` PromptSubmit handler comment matches
+  behavior — a `forbid` contract on user text DOES block at
+  `PromptSubmit`.
+- `harness.fuzz` no longer reaches into `Dispatcher._tools` via
+  underscores; uses the public `dispatcher.tools` property.
+
+### Changed
+
+- DAP step semantics are frame-aware. `stepIn` pauses at the next
+  `PreToolUse`; `stepOut` from a tool frame pauses at the next
+  event after `PostToolUse`; `next` runs to the next turn boundary.
+  Pre-1.3.0 all three aliased to per-turn step. Falls back to
+  step-over if `attach_hooks` isn't called.
+- `OpenTelemetrySink` emits proper spans (was: flat events on the
+  current span). See Added.
+- Plan subset matching is O(N) per call (was: O(N²) with a heavy
+  per-call `compile_contract`). `PlanGuardedRunner` precompiles
+  each step's DFA at construction and indexes step positions by
+  tool name.
+- `InsertTurn` docstring now honestly describes truncate-then-append
+  semantics. Name retained for backwards compatibility.
+
+### Refactored (internal — zero behavior change)
+
+- `AnthropicRunner.__call__` and `run_stream` no longer maintain
+  two ~150-line tool-use loops in parallel. New private
+  `_iterate_tool_loop(agent, messages) -> AsyncGenerator[StreamEvent, None]`
+  carries the state machine; `run_stream` is a 2-line passthrough;
+  `__call__` consumes under `contextlib.aclosing()` and returns the
+  `MessageEnd` message. Net `-123` lines. The 9 parity tests above
+  pass identically before and after — that was the entire point of
+  pinning them first.
+
+### Security
+
+- `harness.sandbox.PathScope` docstring explicitly calls out that
+  case-sensitivity is filesystem-dependent — a deny prefix of
+  `/tmp/secret` does NOT block `/tmp/SECRET` on macOS-default APFS
+  or Windows NTFS. "Advisory, not enforced — use OS isolation"
+  disclaimer remains.
+- `harness.memory.FileStore.session_id` validator extended to
+  reject `:`, `;`, `\n`, `\r`, `\0`, and any `ord < 32`.
+
+### Infrastructure
+
+- Reusable CI workflow `.github/workflows/_gate.yml` extracts the
+  shared gate (ruff/mypy/pytest/codeblocks/mkdocs/uv build +
+  base-install smoke). `ci.yml` and `release.yml` both call it via
+  `workflow_call`.
+- `release.yml` references the correct PyPI distribution
+  (`harness-engineering-toolkit`) and runs the same codeblocks
+  gate `ci.yml` does.
+- Base-install CI cell verifies that a fresh no-extras venv
+  resolves every name in `__all__`, all submodules import cleanly,
+  and `harness --help` lists the subcommands.
+- Codeblock-gate expanded to all of `docs/cookbook/*.md` and
+  `docs/modules/*.md` (was: only `quickstart` + `index`).
+- Coverage `fail_under` ratcheted 85 → 88. Actual: 90.27%.
+- `CONTRIBUTING.md` gains a "Code review checklist" with the first
+  rule: **Remove what doesn't earn its keep.**
+- `FileStore` / `FileFingerprintStore` class docstrings carry
+  explicit cross-process write contracts (atomic-rename / lost
+  update for the former; `O_APPEND` / `PIPE_BUF` interleave for
+  the latter).
+
+### Migration
+
+Strictly additive on the documented happy path. Two technically
+breaking changes — kwargs that the implementation silently
+ignored, so no caller sees a behavior change:
+
+- `OpenTelemetrySink(tracer=)` was removed mid-cycle; the same
+  kwarg returns in this release with real behavior (synthesizing
+  spans on the supplied tracer). Callers who passed the kwarg
+  before this release got a no-op; the kwarg now does what it
+  always claimed.
+- `PrivacyBoundary(on_detect=)` removed; per-detector `action` is
+  honored directly.
+
+If your DAP integration relies on `stepIn`/`stepOut` falling back
+to step-over (the pre-1.3.0 alias behavior), it still does when
+the adapter is used without `attach_hooks`. Wire
+`adapter.attach_hooks(hook_runner)` to opt into frame-aware
+stepping.
 
 ## [1.0.2] — 2026-05-13
 

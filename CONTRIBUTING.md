@@ -85,6 +85,25 @@ Browse to `http://localhost:8000`. Hot-reload on file save.
 - **Explicit error handling**. No silent failures, no `except: pass` (use `contextlib.suppress` if you really must).
 - **Test behavior, not implementation**. Mock at boundaries (APIs, databases), not internal code.
 
+## Code review checklist
+
+A handful of rules earned from repeated audit findings. Apply them when
+reviewing your own PRs.
+
+### Remove what doesn't earn its keep
+
+A kwarg, parameter, or attribute that the implementation ignores is a bug,
+not a "reserved for future use." Either honor it or remove it.
+
+The 1.0.3 audit caught four instances of dead kwargs (`PrivacyBoundary.on_detect`,
+`OpenTelemetrySink.tracer`, `derive_plan.plan_schema`, `Dispatcher.dispatch.start`).
+Each was removed or wired up. New code should not introduce more.
+
+This discipline keeps the public surface honest: every documented argument
+either changes behavior or fails loudly, and users can't build on behavior
+that doesn't exist. When in doubt, delete — re-adding a kwarg later is a
+minor release; removing a kwarg that someone depended on is a major one.
+
 ## Releasing (maintainer-only)
 
 1. Update `CHANGELOG.md`: move `[Unreleased]` items under a new version heading, set the date.

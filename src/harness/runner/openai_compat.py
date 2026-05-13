@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 try:
@@ -44,6 +45,8 @@ from harness.prompts.messages import ContentBlock, Message, text
 from harness.runner.protocols import PrefixWatcherProtocol, SpeculatorProtocol
 from harness.tools.dispatcher import Dispatcher
 from harness.tools.schema import ToolCall, ToolResult
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_tool_content(content: Any) -> str:
@@ -123,9 +126,15 @@ def _translate_in(messages: list[Message]) -> list[dict[str, Any]]:
                 text_parts.append(f"<file path={block.path}>\n{block.text or ''}\n</file>")
 
         if msg.role == "assistant":
+            joined_assistant_text = "".join(text_parts)
+            # M1.10: some OpenAI-compatible backends (vLLM, llama.cpp)
+            # reject assistant messages that carry neither text content
+            # nor tool_calls. Drop empty rows before they hit the wire.
+            if not joined_assistant_text and not tool_uses:
+                continue
             entry: dict[str, Any] = {
                 "role": "assistant",
-                "content": "".join(text_parts),
+                "content": joined_assistant_text,
             }
             if tool_uses:
                 entry["tool_calls"] = [
@@ -264,7 +273,13 @@ class OpenAICompatRunner:
 
     async def __call__(self, agent: SubAgent, messages: list[Message]) -> Message:
         all_messages: list[Message] = []
-        if agent.system_prompt:
+        # M1.25: if the caller already supplied a system message, honor
+        # it rather than shipping two system blocks (the agent's prompt
+        # plus the caller's). OpenAI-compatible servers vary in how
+        # they handle duplicate system rows — some concatenate, some
+        # error, some only honor the first. Caller wins.
+        caller_has_system = any(m.role == "system" for m in messages)
+        if agent.system_prompt and not caller_has_system:
             all_messages.append(text("system", agent.system_prompt))
         all_messages.extend(messages)
 
@@ -362,10 +377,36 @@ class OpenAICompatRunner:
                 for tc in tool_calls:
                     if tc.type != "function":
                         continue
+                    # M1.24: surface malformed tool-call JSON as a visible
+                    # error in the trajectory rather than silently calling
+                    # the tool with empty args. The synthesized ToolResult
+                    # goes back to the model so it can self-correct, and
+                    # we skip both the hook cycle and the dispatch.
                     try:
                         arguments = json.loads(tc.function.arguments)
-                    except ValueError:
-                        arguments = {}
+                    except ValueError as exc:
+                        logger.warning(
+                            "malformed tool-call JSON for %s (id=%s): %s",
+                            tc.function.name,
+                            tc.id,
+                            exc,
+                        )
+                        result = ToolResult(
+                            id=tc.id,
+                            content=f"malformed tool-call JSON: {exc}",
+                            is_error=True,
+                        )
+                        tool_result_entries.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": _serialize_tool_content(result.content),
+                            }
+                        )
+                        synthesized_result_blocks.append(
+                            ContentBlock(type="tool_result", tool_result=result)
+                        )
+                        continue
 
                     call = ToolCall(name=tc.function.name, arguments=arguments, id=tc.id)
 

@@ -65,6 +65,7 @@ nav:
   - Cookbook:
       - Overview: cookbook/index.md
       - Redact PII: cookbook/redact-pii.md
+      - Block prompt injection: cookbook/prompt-submit-contracts.md
       - Replay evaluation: cookbook/replay-evaluation.md
       - Debug a trajectory: cookbook/debug-a-trajectory.md
       - Fuzz a tool: cookbook/fuzz-a-tool.md
@@ -91,6 +92,8 @@ nav:
       - debug: modules/debug.md
       - speculate: modules/speculate.md
       - streaming: modules/streaming.md
+  - Contracts:
+      - User-code execution: contracts/user-code-execution.md
   - Comparison: comparison.md
   - FAQ: faq.md
   - Roadmap: roadmap.md

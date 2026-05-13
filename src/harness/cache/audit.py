@@ -148,18 +148,25 @@ async def audit(store: FingerprintStore, window_hours: float = 24.0) -> DriftRep
         # Walk pairwise; record one DriftEvent per transition. Backfill
         # the "before" full_prompt from the most recent prior record
         # that carried one (mirrors the watcher's `on_drift` policy:
-        # the previous prompt may be on an earlier record).
+        # the previous prompt may be on an earlier record). Track the
+        # timestamp of that source record so `before_ts` matches the
+        # body we actually report — otherwise `before_ts` would point
+        # at an intermediate identical record while the diff body came
+        # from an earlier one.
         prev_full_prompt: str | None = None
+        prev_full_prompt_ts: datetime | None = None
         for prior, current in zip(records, records[1:], strict=False):
             if prior.full_prompt is not None:
                 prev_full_prompt = prior.full_prompt
+                prev_full_prompt_ts = prior.timestamp
             if prior.hash == current.hash:
                 continue
             diff = _make_diff(prev_full_prompt, current.full_prompt)
+            before_ts = prev_full_prompt_ts if prev_full_prompt_ts is not None else prior.timestamp
             events.append(
                 DriftEvent(
                     breakpoint_index=breakpoint_index,
-                    before_ts=prior.timestamp,
+                    before_ts=before_ts,
                     after_ts=current.timestamp,
                     before_hash=prior.hash,
                     after_hash=current.hash,

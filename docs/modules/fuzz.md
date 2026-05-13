@@ -17,10 +17,14 @@ generated inputs into a property-based test.
 
 ## Quick example
 
+<!-- reason: shell example, not executed in the codeblock gate -->
+<!--pytest.mark.skip-->
 ```bash
 uv add 'harness-engineering-toolkit[fuzz]'
 ```
 
+<!-- reason: illustrative; references undefined dispatcher and needs the [fuzz] extra -->
+<!--pytest.mark.skip-->
 ```python
 import asyncio
 from harness.fuzz import fuzz_tool
@@ -40,6 +44,8 @@ for failure in report.failures:
 
 pytest property test:
 
+<!-- reason: illustrative; decorates at module scope with an undefined dispatcher -->
+<!--pytest.mark.skip-->
 ```python
 from harness.fuzz import harness_property
 from harness.tools.schema import ToolCall

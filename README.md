@@ -12,11 +12,11 @@ The "harness" is everything around the model: prompt assembly, tool wiring, perm
 | ------------------ | ----------------------------------------------------------------------- |
 | `harness.tools`    | Pydantic-backed `Tool` + async `Dispatcher` with validation             |
 | `harness.prompts`  | `Message` / `ContentBlock`, file attachment, last-N compaction, summarization-based compaction |
-| `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit; events: `SessionStart` / `SessionEnd` / `PromptSubmit` / `PreToolUse` / `PostToolUse` / `PostAssistantMessage` / `Stop` |
+| `harness.hooks`    | Typed `Event`s, ordered `HookRunner` with `block`-aware short-circuit; events: `SessionStart` / `SessionEnd` (emitted by `Orchestrator.run`), `PromptSubmit` (emitted by `Session.send`), `PreToolUse` / `PostToolUse` / `PostAssistantMessage` (emitted by tool-loop runners), `Stop` |
 | `harness.policy`   | `AllowList` / `DenyList` / `ArgumentMatcher` policies for tool calls    |
 | `harness.agents`   | `SubAgent` + `Orchestrator` that emits lifecycle hooks (model-agnostic) |
 | `harness.runner`   | Pluggable runners satisfying the `Runner` protocol: `EchoRunner` / `CannedRunner` (no deps), `AnthropicRunner` (extra `[anthropic]`), `OpenAICompatRunner` for OpenAI / vLLM / Ollama / llama.cpp / LM Studio (extra `[openai-compat]`); structural `prefix_watcher` / `speculator` extension kwargs |
-| `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator. `OpenTelemetrySink` available under `[otel]` extra — emits each `TelemetryEvent` as a flat OTel `Event` on the current span (span nesting deferred until the recorder tracks correlation IDs) |
+| `harness.telemetry`| Pluggable `Sink` protocol + `JSONLSink` / `MemorySink` / `MultiSink`; opt-in observability for dispatcher and orchestrator. `OpenTelemetrySink` available under `[otel]` extra — synthesizes one OTel span per `TelemetryEvent` (span name = `event.kind`, attributes lifted from the event payload), with trace continuity via the recorder's `trace_id` / `span_id` correlation IDs |
 | `harness.memory`   | `SessionRecord`, `MemoryStore` protocol, `InMemoryStore` / `FileStore`, plus a `Session` helper that snapshots after every turn |
 | `harness.sandbox`  | `PathScope` + `PathPolicy` for filesystem-scoped tool calls, `safe_subprocess_run` with scrubbed env and timeout |
 | `harness.replay`   | `ReplayRunner` for deterministic playback, `run_eval`, `compare_sessions` (ignores tool-call IDs), `counterfactual` mutation + continuation, `diff_eval` cross-provider matrix |
