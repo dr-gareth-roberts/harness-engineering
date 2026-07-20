@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, chore/initial-scaffold]
   push:
-    branches: [main]
+    branches: [main, chore/initial-scaffold]
   workflow_dispatch:
 
 # Cancel in-flight runs on the same ref when a new push lands —

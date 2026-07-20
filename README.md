@@ -1,6 +1,10 @@
 # harness-engineering
 
-Opensource toolbox for harness engineering — utilities, primitives, and patterns for building robust harnesses around LLM-powered agents and coding tools.
+[![CI](https://github.com/dr-gareth-roberts/harness-engineering/actions/workflows/ci.yml/badge.svg)](https://github.com/dr-gareth-roberts/harness-engineering/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
+Open-source toolbox for harness engineering — utilities, primitives, and patterns for building robust harnesses around LLM-powered agents and coding tools.
 
 ## Scope
 
@@ -42,6 +46,38 @@ The "harness" is everything around the model: prompt assembly, tool wiring, perm
 ### CLI
 
 `harness --help` lists the subcommands; new features register their own subparser via a `register(subparsers)` callable lazily discovered via `importlib.util.find_spec`. Currently shipped: `cache-audit`, `debug`.
+
+## Architecture
+
+Every module is wired through structural protocols, so each piece is
+replaceable and the model itself stays opaque. The three seams are the
+`Runner` (model interface), the `Sink` (telemetry surface), and the
+`MemoryStore` (session persistence). Cross-cutting concerns — debugging,
+plan enforcement, privacy redaction, speculation, cache-drift auditing —
+compose by wrapping a `Runner` rather than modifying it.
+
+```mermaid
+flowchart TD
+    Session[Session / user code] --> Orch[Orchestrator]
+    Orch --> Wrappers["Wrapper runners<br/>Debug · PlanGuard · Privacy"]
+    Wrappers --> Model["Model runner<br/>Echo · Canned · Replay<br/>Anthropic · OpenAICompat"]
+    Model --> Disp[Dispatcher]
+    Disp --> Tools[Tools]
+    Model -. "speculator / prefix_watcher" .-> SpecCache["Speculator · PrefixWatcher"]
+
+    Orch -->|lifecycle hooks| Hooks[HookRunner]
+    Disp -->|Pre/PostToolUse| Hooks
+    Hooks --> Policy["Policy · Contracts"]
+
+    Orch --> Mem[(MemoryStore)]
+    Orch --> Sink[[Telemetry Sink]]
+    Disp --> Sink
+```
+
+`Orchestrator.run` emits `SessionStart` / `SessionEnd`; the tool loop
+emits `PreToolUse` / `PostToolUse` around every dispatch, where policies
+and contracts enforce invariants. See [`docs/architecture.md`](docs/architecture.md)
+for the full composition idiom and hook taxonomy.
 
 ## Install
 
@@ -90,6 +126,22 @@ A runnable script that wires all four base modules together lives at
 
 ```bash
 uv run python examples/end_to_end.py
+```
+
+Expected output — a policy blocks a forbidden tool, hooks fire around
+the allowed one, and the transcript is reconstructed:
+
+```text
+[hook:pre]  -> tool=shell args={'command': 'echo hi'}
+[policy]    BLOCKED tool=shell reason=tool 'shell' not in allow-list
+[hook:pre]  -> tool=echo args={'text': 'hello'}
+[hook:post] <- tool=echo content='hello'
+--- transcript ---
+input messages: 3
+  [0] role=system blocks=['text']
+  [1] role=user blocks=['file']
+  [2] role=user blocks=['text']
+final assistant message: "Skipped forbidden tool; echoed 'hello'."
 ```
 
 ## Runners
